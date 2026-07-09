@@ -1,7 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
+    "bindings/node",
+    "bindings/python",
     "crates/basecrawl-core",
+    "crates/basecrawl-ffi",
     "crates/basecrawl-proof",
     "crates/basecrawl-render",
 ]
@@ -37,6 +40,9 @@ time = { version = "0.3", features = ["formatting", "parsing"] }
 quick-xml = "0.39"
 pdf-extract = "0.12"
 zip = { version = "7.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+pyo3 = { version = "0.24", features = ["extension-module"] }
+napi = { version = "3", default-features = false, features = ["napi8", "serde-json"] }
+napi-derive = "3"
 
 [profile.release]
 opt-level = 3

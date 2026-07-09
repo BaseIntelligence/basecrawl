@@ -1,6 +1,12 @@
 # Rust build artifacts
 /target
 **/*.rs.bk
+/bindings/c/build/
+/bindings/node/node_modules/
+/bindings/node/*.node
+/bindings/python/.venv/
+/bindings/python/**/__pycache__/
+/bindings/python/python/basecrawl/_basecrawl*.so
 
 # Secrets (never commit)
 .env

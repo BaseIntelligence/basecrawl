@@ -1,0 +1,14 @@
+[package]
+name = "basecrawl-python"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "_basecrawl"
+crate-type = ["cdylib"]
+
+[dependencies]
+basecrawl-ffi = { path = "../../crates/basecrawl-ffi" }
+pyo3 = { workspace = true }

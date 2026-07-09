@@ -1,0 +1,17 @@
+[package]
+name = "basecrawl-sdk"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+basecrawl-ffi = { path = "../../crates/basecrawl-ffi" }
+napi = { workspace = true }
+napi-derive = { workspace = true }
+
+[build-dependencies]
+napi-build = "2"
