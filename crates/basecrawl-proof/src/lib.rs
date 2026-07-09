@@ -96,6 +96,10 @@ pub struct ResultBlock {
     pub formats_produced: BTreeMap<String, Value>,
     pub result_hash: Option<String>,
     pub completeness_manifest: Value,
+    /// The ordered set of page URLs crawled when pagination following is enabled (page 1 first).
+    /// Omitted when pagination was not followed, so a single-page scrape is unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub crawled_urls: Vec<String>,
 }
 
 /// Network egress metadata (egress IP, geo landmark RTTs, timestamp, fingerprint seed).
@@ -153,6 +157,7 @@ mod tests {
                 formats_produced: BTreeMap::new(),
                 result_hash: None,
                 completeness_manifest: Value::Object(Default::default()),
+                crawled_urls: Vec::new(),
             },
             egress: Egress::default(),
             attestation: Attestation::default(),
@@ -193,6 +198,23 @@ mod tests {
         assert!(v["attestation"]["measurement"].is_null());
         assert!(v["attestation"]["report_data"].is_null());
         assert!(v["sdk_signature"]["sig"].is_null());
+    }
+
+    #[test]
+    fn crawled_urls_omitted_when_empty_and_present_when_set() {
+        let v: Value = serde_json::from_str(&sample().to_canonical_json()).unwrap();
+        assert!(
+            !v["result"]
+                .as_object()
+                .unwrap()
+                .contains_key("crawled_urls"),
+            "crawled_urls must be omitted for a single-page scrape"
+        );
+
+        let mut p = sample();
+        p.result.crawled_urls = vec!["https://a/".into(), "https://a/page-2".into()];
+        let v: Value = serde_json::from_str(&p.to_canonical_json()).unwrap();
+        assert_eq!(v["result"]["crawled_urls"].as_array().unwrap().len(), 2);
     }
 
     #[test]

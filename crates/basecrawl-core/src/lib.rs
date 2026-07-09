@@ -14,6 +14,7 @@ pub mod html;
 pub mod links;
 pub mod markdown;
 pub mod metadata;
+pub mod pagination;
 pub mod screenshot;
 pub mod url_validation;
 
@@ -22,16 +23,20 @@ use basecrawl_proof::{
 };
 use fetch::{FetchConfig, DEFAULT_TIMEOUT_SECS, DEFAULT_USER_AGENT};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 use url::Url;
 
 pub use basecrawl_proof::ScrapeProof;
+pub use basecrawl_render::{Action, ScrollDirection};
 pub use error::Error;
 pub use format::Format;
 
 /// The default HTTP method for a scrape.
 pub const DEFAULT_METHOD: &str = "GET";
+
+/// Default cap on the number of pages crawled when pagination following is enabled.
+pub const DEFAULT_MAX_PAGES: usize = 5;
 
 /// Options controlling a single scrape.
 #[derive(Debug, Clone)]
@@ -59,6 +64,14 @@ pub struct ScrapeOptions {
     /// Whole-render timeout in seconds bounding the JS render step independently of the fetch
     /// timeout, so a pathological (never-idle) page is aborted rather than hanging.
     pub render_timeout_secs: u64,
+    /// Scripted navigation actions executed in order in the browser after the page settles and
+    /// before capture (click / scroll / wait / wait-for-selector).
+    pub actions: Vec<Action>,
+    /// When true, follow "next page" links across a paginated listing, aggregating markdown and
+    /// recording the crawled URL set.
+    pub follow_pagination: bool,
+    /// The maximum number of pages crawled (including the first) when `follow_pagination` is set.
+    pub max_pages: usize,
 }
 
 impl Default for ScrapeOptions {
@@ -77,6 +90,9 @@ impl Default for ScrapeOptions {
             render_enabled: true,
             wait_for: None,
             render_timeout_secs: basecrawl_render::DEFAULT_RENDER_TIMEOUT_SECS,
+            actions: Vec::new(),
+            follow_pagination: false,
+            max_pages: DEFAULT_MAX_PAGES,
         }
     }
 }
@@ -126,6 +142,7 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
                 &config.user_agent,
                 Duration::from_secs(options.render_timeout_secs),
                 options.wait_for.as_deref(),
+                &options.actions,
             )?)
         } else {
             None
@@ -172,6 +189,56 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
         formats_produced.insert(f.as_str().to_string(), value);
     }
 
+    // Pagination following: walk "next page" links, aggregating markdown and recording the crawled
+    // URL set. Gated behind the option, so a single-page scrape is unchanged. Subsequent pages are
+    // best-effort — a failed page ends the crawl rather than failing the whole scrape.
+    let mut crawled_urls: Vec<String> = Vec::new();
+    if options.follow_pagination {
+        crawled_urls.push(url.as_str().to_string());
+        let max_pages = options.max_pages.max(1);
+        let mut current_html = rendered_html
+            .clone()
+            .unwrap_or_else(|| body_str.clone().into_owned());
+        let mut current_base = page_base.clone();
+        let mut visited: HashSet<String> = HashSet::new();
+        visited.insert(url.as_str().to_string());
+
+        let mut aggregated_markdown: Option<String> = if formats.contains(&Format::Markdown) {
+            formats_produced
+                .get(Format::Markdown.as_str())
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        } else {
+            None
+        };
+
+        while crawled_urls.len() < max_pages {
+            let Some(next) = pagination::find_next(&current_html, &current_base) else {
+                break;
+            };
+            let key = next.as_str().to_string();
+            if !visited.insert(key.clone()) {
+                break;
+            }
+            let Ok((page_markdown, page_html, page_base_next)) =
+                crawl_page(&next, options, &config)
+            else {
+                break;
+            };
+            if let Some(agg) = aggregated_markdown.as_mut() {
+                agg.push_str("\n\n");
+                agg.push_str(&page_markdown);
+            }
+            crawled_urls.push(key);
+            current_html = page_html;
+            current_base = page_base_next;
+        }
+
+        if let Some(agg) = aggregated_markdown {
+            formats_produced.insert(Format::Markdown.as_str().to_string(), Value::String(agg));
+        }
+    }
+
     // `result_hash` covers only the deterministic result surface; `screenshot` (and `json`) are
     // excluded so a viewport tweak that changes only pixels never shifts the byte-quorum digest.
     let result_hash = canonical::result_hash(&formats_produced);
@@ -200,9 +267,40 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
             formats_produced,
             result_hash: Some(result_hash),
             completeness_manifest: Value::Object(serde_json::Map::new()),
+            crawled_urls,
         },
         egress: Egress::default(),
         attestation: Attestation::default(),
         sdk_signature: SdkSignature::default(),
     })
+}
+
+/// Fetch and extract a single pagination page: returns its markdown, the HTML used to locate the
+/// next link (rendered DOM when rendering applies, else the served source), and the resolution base.
+/// Subsequent pages are not subject to the page-1 scripted actions.
+fn crawl_page(
+    url: &Url,
+    options: &ScrapeOptions,
+    config: &FetchConfig,
+) -> Result<(String, String, Url), Error> {
+    let fetched = fetch::fetch(url, config)?;
+    let body_str = String::from_utf8_lossy(&fetched.body).into_owned();
+    let page_base = Url::parse(&fetched.final_url).unwrap_or_else(|_| url.clone());
+    let is_html = fetched.content_type.as_deref().is_none_or(|ct| {
+        let ct = ct.to_ascii_lowercase();
+        ct.contains("html") || ct.contains("xml")
+    });
+    let source = if options.render_enabled && is_html && !body_str.trim().is_empty() {
+        html::render_page(
+            url,
+            &config.user_agent,
+            Duration::from_secs(options.render_timeout_secs),
+            options.wait_for.as_deref(),
+            &[],
+        )?
+    } else {
+        body_str
+    };
+    let markdown = markdown::to_markdown(&source, &page_base);
+    Ok((markdown, source, page_base))
 }

@@ -10,31 +10,43 @@
 
 use std::time::Duration;
 
-use basecrawl_render::{render, RenderConfig, DEFAULT_NETWORK_IDLE_QUIET_MS};
+use basecrawl_render::{render, Action, RenderConfig, RenderError};
 use url::Url;
 
 use crate::error::Error;
+use crate::fetch::MAX_REDIRECTS;
 
 /// Render `url` with headless Chromium and return its cleaned, post-render DOM serialization.
 ///
 /// `wait_for`, when supplied, blocks capture until an element matching that CSS selector exists;
-/// otherwise the render smart-waits for network idle. The render is bounded by `timeout`. A render
-/// failure (no browser available, navigation/eval failure, an exceeded timeout, empty DOM) is
-/// surfaced as a structured [`Error`] so the scrape fails loudly rather than emitting misleading
-/// output.
+/// otherwise the render smart-waits for network idle while following (and bounding) any client-side
+/// redirect (meta-refresh / `window.location`). The render also collects infinite-scroll content,
+/// dismisses cookie/consent overlays, executes the supplied `actions` in order, and inlines
+/// iframe/shadow-DOM content before serializing. Client-side redirects share the HTTP redirect hop
+/// cap ([`MAX_REDIRECTS`]) and a loop is surfaced as [`Error::TooManyRedirects`]. The render is
+/// bounded by `timeout`; any other failure is surfaced as a structured [`Error`] so the scrape
+/// fails loudly rather than emitting misleading output.
 pub fn render_page(
     url: &Url,
     user_agent: &str,
     timeout: Duration,
     wait_for: Option<&str>,
+    actions: &[Action],
 ) -> Result<String, Error> {
     let config = RenderConfig {
         timeout,
         user_agent: user_agent.to_string(),
         wait_for: wait_for.map(str::to_string),
-        network_idle: true,
-        quiet_period: Duration::from_millis(DEFAULT_NETWORK_IDLE_QUIET_MS),
+        actions: actions.to_vec(),
+        max_redirects: MAX_REDIRECTS,
+        ..RenderConfig::default()
     };
-    let rendered = render(url, &config).map_err(|e| Error::Render(e.to_string()))?;
-    Ok(rendered.html)
+    match render(url, &config) {
+        Ok(rendered) => Ok(rendered.html),
+        Err(RenderError::TooManyRedirects { max }) => Err(Error::TooManyRedirects {
+            max,
+            url: url.to_string(),
+        }),
+        Err(e) => Err(Error::Render(e.to_string())),
+    }
 }

@@ -160,6 +160,7 @@ dependencies = [
  "base64",
  "headless_chrome",
  "png",
+ "serde",
  "serde_json",
  "thiserror",
  "url",

@@ -7,7 +7,9 @@
 use base64::Engine;
 use basecrawl_core::error::Error;
 use basecrawl_core::fetch::{parse_header, DEFAULT_TIMEOUT_SECS};
-use basecrawl_core::{format, scrape, screenshot, Format, ScrapeOptions};
+use basecrawl_core::{
+    format, scrape, screenshot, Action, Format, ScrapeOptions, DEFAULT_MAX_PAGES,
+};
 use clap::Parser;
 use std::path::PathBuf;
 
@@ -53,6 +55,20 @@ struct Cli {
     /// this bound instead of hanging [default: the --timeout value].
     #[arg(long = "render-timeout", value_name = "SECONDS")]
     render_timeout: Option<u64>,
+
+    /// Ordered scripted actions as a JSON array executed in the browser before capture, e.g.
+    /// '[{"type":"click","selector":"#more"},{"type":"wait","milliseconds":500}]'.
+    #[arg(long = "actions", value_name = "JSON")]
+    actions: Option<String>,
+
+    /// Follow "next page" links across a paginated listing, aggregating content and recording the
+    /// crawled URL set (result.crawled_urls).
+    #[arg(long = "follow-pagination", default_value_t = false)]
+    follow_pagination: bool,
+
+    /// Maximum number of pages to crawl (including the first) when --follow-pagination is set.
+    #[arg(long = "max-pages", default_value_t = DEFAULT_MAX_PAGES, value_name = "N")]
+    max_pages: usize,
 
     /// Screenshot viewport WIDTHxHEIGHT in CSS pixels (device-scale-factor 1).
     #[arg(long, default_value = "1280x800", value_name = "WxH")]
@@ -101,6 +117,13 @@ fn run(cli: Cli) -> Result<String, Error> {
         .map(|spec| parse_header(spec))
         .collect::<Result<Vec<_>, _>>()?;
 
+    // Parse scripted actions before any fetch so a malformed spec never triggers a network request.
+    let actions = match &cli.actions {
+        Some(json) => serde_json::from_str::<Vec<Action>>(json)
+            .map_err(|e| Error::InvalidActions(e.to_string()))?,
+        None => Vec::new(),
+    };
+
     let options = ScrapeOptions {
         formats,
         task_id: cli.task_id,
@@ -114,6 +137,9 @@ fn run(cli: Cli) -> Result<String, Error> {
         // Bound the render by its own flag when given, else reuse the request timeout so a single
         // --timeout still bounds a pathological render.
         render_timeout_secs: cli.render_timeout.unwrap_or(cli.timeout),
+        actions,
+        follow_pagination: cli.follow_pagination,
+        max_pages: cli.max_pages,
     };
 
     let proof = scrape(&raw_url, &options)?;

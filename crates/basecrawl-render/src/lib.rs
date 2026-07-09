@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use headless_chrome::protocol::cdp::{Emulation, Page};
 use headless_chrome::{Browser, LaunchOptions, Tab};
+use serde::Deserialize;
 use url::Url;
 
 /// Default render timeout (seconds) when the caller does not specify one.
@@ -22,6 +23,14 @@ pub const DEFAULT_RENDER_TIMEOUT_SECS: u64 = 30;
 
 /// Default network-idle quiet window: capture once no fetch/XHR has been in flight for this long.
 pub const DEFAULT_NETWORK_IDLE_QUIET_MS: u64 = 500;
+
+/// Default cap on client-side redirect hops (meta-refresh / `window.location`). Kept equal to the
+/// HTTP redirect cap so a client redirect loop is bounded by the same limit as an HTTP one.
+pub const DEFAULT_MAX_REDIRECTS: usize = 20;
+
+/// Default maximum number of auto-scroll steps used to collect infinite-scroll / lazy-loaded
+/// content before giving up (each step is also bounded by the render deadline).
+pub const DEFAULT_MAX_SCROLLS: usize = 15;
 
 /// Candidate Chromium executables searched (in order) when `CHROME` is unset.
 const CHROME_CANDIDATES: &[&str] = &[
@@ -44,8 +53,45 @@ pub enum RenderError {
     Timeout(Duration),
     #[error("timed out waiting for selector {selector:?}: {detail}")]
     WaitFor { selector: String, detail: String },
+    #[error("exceeded the maximum of {max} client-side redirect hop(s)")]
+    TooManyRedirects { max: usize },
     #[error("browser returned no serialized DOM")]
     NoContent,
+}
+
+/// Direction of a scripted [`Action::Scroll`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScrollDirection {
+    /// Scroll one viewport down (the default).
+    #[default]
+    Down,
+    /// Scroll one viewport up.
+    Up,
+}
+
+/// A single scripted navigation action, executed in the order supplied after the page has settled.
+///
+/// The wire form is a tagged JSON object (`{"type": "...", ...}`) so a caller can pass an ordered
+/// action list on the command line, e.g.
+/// `[{"type":"click","selector":"#more"},{"type":"wait","milliseconds":500}]`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum Action {
+    /// Click the first element matching a CSS selector.
+    Click { selector: String },
+    /// Scroll the viewport one screen in a direction.
+    Scroll {
+        #[serde(default)]
+        direction: ScrollDirection,
+    },
+    /// Pause for a fixed number of milliseconds (bounded by the render deadline).
+    Wait {
+        #[serde(default)]
+        milliseconds: u64,
+    },
+    /// Block until an element matching a CSS selector exists (bounded by the render deadline).
+    WaitForSelector { selector: String },
 }
 
 /// Configuration for a single render.
@@ -65,6 +111,19 @@ pub struct RenderConfig {
     pub network_idle: bool,
     /// The quiet window that defines "network idle" for the smart wait.
     pub quiet_period: Duration,
+    /// Scripted actions executed in order after the page settles and before capture.
+    pub actions: Vec<Action>,
+    /// When true, client-side redirects (meta-refresh / `window.location`) are followed and bounded
+    /// by `max_redirects`; a loop exceeding the cap is aborted with [`RenderError::TooManyRedirects`].
+    pub follow_client_redirects: bool,
+    /// The client-side redirect hop cap (mirrors the HTTP redirect cap).
+    pub max_redirects: usize,
+    /// When true, the page is auto-scrolled to collect infinite-scroll / lazy-loaded content.
+    pub auto_scroll: bool,
+    /// The maximum number of auto-scroll steps attempted before giving up.
+    pub max_scrolls: usize,
+    /// When true, a detected cookie/consent overlay is dismissed before capture.
+    pub dismiss_consent: bool,
 }
 
 impl Default for RenderConfig {
@@ -75,6 +134,12 @@ impl Default for RenderConfig {
             wait_for: None,
             network_idle: true,
             quiet_period: Duration::from_millis(DEFAULT_NETWORK_IDLE_QUIET_MS),
+            actions: Vec::new(),
+            follow_client_redirects: true,
+            max_redirects: DEFAULT_MAX_REDIRECTS,
+            auto_scroll: true,
+            max_scrolls: DEFAULT_MAX_SCROLLS,
+            dismiss_consent: true,
         }
     }
 }
@@ -130,17 +195,49 @@ fn launch_browser(timeout: Duration, window_size: (u32, u32)) -> Result<Browser,
     Browser::new(options).map_err(|e| RenderError::Launch(e.to_string()))
 }
 
-/// In-page cleaning + serialization script.
+/// In-page finalize script: inline embedded content, clean, and serialize (a single CDP round-trip).
 ///
-/// Executed *after* the page has loaded and its scripts have run, so any JS-injected content is
-/// already in the DOM. It then removes `<script>`/`<style>`/`<noscript>` nodes (making `html` a
-/// cleaned serialization that is deterministically script/style-free and clearly distinct from the
-/// raw served source) and returns `document.documentElement.outerHTML`. It never rewrites element
-/// URL attributes, so relative asset/link URLs are preserved exactly as authored (consistent,
-/// no-rewrite policy).
+/// Executed *after* the page has loaded and its scripts have run (so any JS-injected content is
+/// already in the DOM). It first inlines open shadow roots and same-origin iframe documents into the
+/// light DOM so their text is surfaced, then removes `<script>`/`<style>`/`<noscript>` nodes (making
+/// `html` a cleaned serialization that is deterministically script/style-free and clearly distinct
+/// from the raw served source), and returns `document.documentElement.outerHTML`. It never rewrites
+/// element URL attributes, so relative asset/link URLs are preserved exactly as authored (consistent,
+/// no-rewrite policy). Cross-origin iframes (whose document JS cannot read) and closed shadow roots
+/// are skipped.
 const CLEAN_AND_SERIALIZE: &str = "(function(){\
+try{\
+function inlineShadow(root){\
+var els=root.querySelectorAll('*');\
+for(var i=0;i<els.length;i++){\
+var el=els[i];\
+if(el.shadowRoot){\
+inlineShadow(el.shadowRoot);\
+var h=document.createElement('div');\
+h.setAttribute('data-basecrawl-shadow','');\
+h.innerHTML=el.shadowRoot.innerHTML;\
+el.appendChild(h);\
+}\
+}\
+}\
+inlineShadow(document);\
+var frames=document.querySelectorAll('iframe');\
+for(var j=0;j<frames.length;j++){\
+var f=frames[j];\
+try{\
+var doc=f.contentDocument;\
+if(doc){\
+var b=doc.body||doc.documentElement;\
+var h2=document.createElement('div');\
+h2.setAttribute('data-basecrawl-iframe','');\
+h2.innerHTML=b?b.innerHTML:'';\
+if(f.parentNode){f.parentNode.insertBefore(h2,f.nextSibling);}\
+}\
+}catch(e){}\
+}\
+}catch(e){}\
 var nodes=document.querySelectorAll('script,style,noscript');\
-for(var i=0;i<nodes.length;i++){var n=nodes[i];if(n.parentNode){n.parentNode.removeChild(n);}}\
+for(var k=0;k<nodes.length;k++){var n=nodes[k];if(n.parentNode){n.parentNode.removeChild(n);}}\
 return document.documentElement.outerHTML;\
 })()";
 
@@ -202,28 +299,61 @@ fn probe_idle(tab: &Tab) -> Option<IdleSnapshot> {
     })
 }
 
-/// Block until the page has finished loading and its network has been idle for `quiet_period`,
-/// bounded by `deadline`. Returns [`RenderError::Timeout`] (carrying `timeout`) if the page never
-/// settles in time (e.g. a page that fires requests forever).
-fn wait_for_network_idle(
-    tab: &Tab,
-    quiet_period: Duration,
-    deadline: Instant,
-    timeout: Duration,
-) -> Result<(), RenderError> {
-    let poll = Duration::from_millis(100);
-    let quiet_ms = quiet_period.as_millis() as i64;
-    loop {
-        if Instant::now() >= deadline {
-            return Err(RenderError::Timeout(timeout));
-        }
-        if let Some(snap) = probe_idle(tab) {
-            if snap.ready == "complete" && snap.inflight <= 0 && snap.quiet_ms >= quiet_ms {
-                return Ok(());
-            }
-        }
-        std::thread::sleep(poll);
-    }
+/// Best-effort cookie/consent dismissal. Clicks the first accept-like control that is inside a
+/// consent-looking container (id/class hints) or a fixed/sticky high-z-index overlay, and returns
+/// whether a control was clicked. Conservative on purpose so ordinary page buttons are not clicked.
+const CONSENT_DISMISS_JS: &str = "(function(){\
+try{\
+var ACCEPT=/^(accept all|accept all cookies|accept cookies|accept|i accept|agree|i agree|allow all|allow cookies|allow|got it|ok|okay|understood|i understand|continue)$/;\
+function norm(s){return (s||'').replace(/\\s+/g,' ').trim().toLowerCase();}\
+function consenty(el){\
+for(var n=el;n;n=n.parentElement){\
+var id=((n.id||'')+' '+((n.className&&n.className.toString)?n.className.toString():''));\
+if(/cookie|consent|gdpr|privacy|cmp|banner/i.test(id))return true;\
+try{var cs=getComputedStyle(n);if((cs.position==='fixed'||cs.position==='sticky')&&(parseInt(cs.zIndex||'0',10)>=100))return true;}catch(e){}\
+}\
+return false;\
+}\
+var cands=document.querySelectorAll('button,a,[role=\"button\"],input[type=\"button\"],input[type=\"submit\"]');\
+for(var i=0;i<cands.length;i++){\
+var el=cands[i];\
+var t=norm(el.innerText||el.textContent||el.value);\
+if(t&&ACCEPT.test(t)&&consenty(el)){el.click();return true;}\
+}\
+return false;\
+}catch(e){return false;}\
+})()";
+
+/// Build the in-page auto-scroll script (a single async CDP round-trip).
+///
+/// It scrolls to the bottom repeatedly to trigger infinite-scroll / lazy-load. After each scroll it
+/// waits a short window; if the content did not grow and nothing is loading (the in-flight counter is
+/// zero) it stops promptly — so a page with no lazy content pays only that short window. If a scroll
+/// triggered a load it waits (bounded) for the content to grow before scrolling again. The whole loop
+/// is bounded by `max_scrolls` and `budget_ms` (the remaining render budget).
+fn build_auto_scroll_js(max_scrolls: usize, budget_ms: u64) -> String {
+    format!(
+        "(async function(){{\
+var MAX={max_scrolls},SETTLE=250,GROWTH=1800,BUDGET={budget_ms},START=Date.now();\
+function h(){{return Math.max(document.body?document.body.scrollHeight:0,document.documentElement?document.documentElement.scrollHeight:0);}}\
+function inflight(){{return (typeof window.__bcInflight==='number')?window.__bcInflight:0;}}\
+function sleep(ms){{return new Promise(function(r){{setTimeout(r,ms);}});}}\
+var vh=window.innerHeight||(document.documentElement?document.documentElement.clientHeight:0)||0;\
+var last=h();\
+if(last<=vh+1)return true;\
+for(var i=0;i<MAX;i++){{\
+if(Date.now()-START>BUDGET)break;\
+window.scrollTo(0,h());\
+await sleep(SETTLE);\
+if(h()<=last+1&&inflight()<=0)break;\
+var t=Date.now();\
+while(Date.now()-t<GROWTH){{if(h()>last+1)break;await sleep(100);}}\
+if(h()<=last+1)break;\
+last=h();\
+}}\
+return true;\
+}})()"
+    )
 }
 
 /// Render `url` with headless Chromium and return its cleaned, post-render DOM serialization.
@@ -259,13 +389,12 @@ pub fn render(url: &Url, config: &RenderConfig) -> Result<Rendered, RenderError>
 
     tab.navigate_to(url.as_str())
         .map_err(|e| RenderError::Render(e.to_string()))?;
-    tab.wait_until_navigated().map_err(|e| {
-        if Instant::now() >= deadline {
-            RenderError::Timeout(config.timeout)
-        } else {
-            RenderError::Render(e.to_string())
-        }
-    })?;
+    // `navigate_to` returns without waiting for the load to finish. We deliberately do NOT call
+    // `wait_until_navigated` here: it performs its own internal network-idle wait (doubling the
+    // settle delay) and, on a client-side redirect loop (a page that never stops navigating), would
+    // block for the whole render timeout before the hop cap could apply. Instead the settle loop
+    // below polls the top-frame URL and readiness directly (bounded by the deadline), which both
+    // waits for the committed page and detects/bounds client-side redirects.
 
     match &config.wait_for {
         // An explicit selector is the authoritative capture signal (it also handles content injected
@@ -282,12 +411,27 @@ pub fn render(url: &Url, config: &RenderConfig) -> Result<Rendered, RenderError>
                 })?;
         }
         None => {
-            if config.network_idle {
-                wait_for_network_idle(&tab, config.quiet_period, deadline, config.timeout)?;
-            }
+            // Wait for network idle while following (and bounding) any client-side redirect.
+            settle_and_follow_redirects(&tab, config, deadline)?;
         }
     }
+    // Dismiss a cookie/consent overlay (best-effort) so the underlying page, not the banner, is the
+    // captured content; let anything the dismissal reveals settle briefly.
+    if config.dismiss_consent && dismiss_consent(&tab) {
+        settle_quiet(&tab, config.quiet_period, deadline);
+    }
 
+    // Collect infinite-scroll / lazy-loaded content by scrolling until the page stops growing.
+    if config.auto_scroll {
+        auto_scroll(&tab, config, deadline);
+    }
+
+    // Execute the supplied scripted actions in order (click / scroll / wait / wait-for-selector).
+    for action in &config.actions {
+        run_action(&tab, action, deadline)?;
+    }
+
+    // Inline iframe/shadow content, strip scripts/styles, and serialize (one CDP round-trip).
     let evaluated = tab
         .evaluate(CLEAN_AND_SERIALIZE, false)
         .map_err(|e| RenderError::Render(e.to_string()))?;
@@ -296,6 +440,184 @@ pub fn render(url: &Url, config: &RenderConfig) -> Result<Rendered, RenderError>
         Some(serde_json::Value::String(html)) if !html.is_empty() => Ok(Rendered { html }),
         _ => Err(RenderError::NoContent),
     }
+}
+
+/// The current top-frame URL with any fragment removed. Fragment-only changes are SPA hash routing,
+/// not a navigation redirect, so they must not count against the client-redirect hop cap.
+fn current_url_no_fragment(tab: &Tab) -> String {
+    let url = tab.get_url();
+    match url.split_once('#') {
+        Some((base, _)) => base.to_string(),
+        None => url,
+    }
+}
+
+/// Whether `url` is a committed http(s) document (as opposed to `about:blank` / `chrome:` before the
+/// navigation commits).
+fn is_committed_http(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
+}
+
+/// Wait until the committed page has loaded and its network has been idle for `quiet_period`, while
+/// following any client-side redirect (meta-refresh / `window.location`) the top frame performs.
+///
+/// The loop first waits for the top frame to commit to an http(s) document (ignoring the pre-commit
+/// `about:blank`), so it never settles on a blank shell. Thereafter a change of the top-frame URL
+/// (ignoring the fragment) is a client-side redirect: each hop is counted and, when
+/// `follow_client_redirects` is set, bounded by `max_redirects` — a loop exceeding the cap aborts
+/// with [`RenderError::TooManyRedirects`] rather than hanging until the deadline. The whole wait is
+/// also bounded by `deadline` ([`RenderError::Timeout`]).
+fn settle_and_follow_redirects(
+    tab: &Tab,
+    config: &RenderConfig,
+    deadline: Instant,
+) -> Result<(), RenderError> {
+    let poll = Duration::from_millis(100);
+    let quiet_ms = config.quiet_period.as_millis() as i64;
+    let mut current = String::new();
+    let mut committed = false;
+    let mut url_stable_since = Instant::now();
+    let mut hops = 0usize;
+
+    loop {
+        if Instant::now() >= deadline {
+            return Err(RenderError::Timeout(config.timeout));
+        }
+
+        let live = current_url_no_fragment(tab);
+        if !is_committed_http(&live) {
+            // The navigation has not committed to a real page yet (still about:blank).
+            std::thread::sleep(poll);
+            continue;
+        }
+
+        if !committed {
+            // First commit: this is the initial navigation landing, not a client redirect.
+            committed = true;
+            current = live;
+            url_stable_since = Instant::now();
+        } else if live != current {
+            if config.follow_client_redirects {
+                hops += 1;
+                if hops > config.max_redirects {
+                    return Err(RenderError::TooManyRedirects {
+                        max: config.max_redirects,
+                    });
+                }
+            }
+            current = live;
+            url_stable_since = Instant::now();
+            std::thread::sleep(poll);
+            continue;
+        }
+
+        if !config.network_idle {
+            // The URL is stable and network-idle waiting is disabled: nothing more to wait for.
+            return Ok(());
+        }
+
+        if let Some(snap) = probe_idle(tab) {
+            let url_quiet_ms = url_stable_since.elapsed().as_millis() as i64;
+            if snap.ready == "complete"
+                && snap.inflight <= 0
+                && snap.quiet_ms >= quiet_ms
+                && url_quiet_ms >= quiet_ms
+            {
+                return Ok(());
+            }
+        }
+        std::thread::sleep(poll);
+    }
+}
+
+/// Best-effort short settle used after a consent dismissal: return once the network is idle, or
+/// after a brief grace window, whichever comes first (never longer than the render deadline).
+fn settle_quiet(tab: &Tab, quiet: Duration, deadline: Instant) {
+    let poll = Duration::from_millis(50);
+    let quiet_ms = quiet.as_millis() as i64;
+    let step_deadline = (Instant::now() + Duration::from_secs(2)).min(deadline);
+    loop {
+        if Instant::now() >= step_deadline {
+            return;
+        }
+        if let Some(snap) = probe_idle(tab) {
+            if snap.ready == "complete" && snap.inflight <= 0 && snap.quiet_ms >= quiet_ms {
+                return;
+            }
+        }
+        std::thread::sleep(poll);
+    }
+}
+
+/// Attempt to dismiss a cookie/consent overlay by clicking its accept control. Returns whether a
+/// control was clicked. The match is deliberately conservative (an accept-like label *inside* a
+/// consent-looking container or a fixed/sticky high-z-index overlay) so ordinary page buttons are
+/// left untouched.
+fn dismiss_consent(tab: &Tab) -> bool {
+    matches!(
+        tab.evaluate(CONSENT_DISMISS_JS, false)
+            .ok()
+            .and_then(|r| r.value),
+        Some(serde_json::Value::Bool(true))
+    )
+}
+
+/// Collect infinite-scroll / lazy-loaded content by running the in-page auto-scroll loop as a single
+/// awaited CDP call, bounded by `max_scrolls` and the remaining render budget. Best-effort: any
+/// failure or deadline simply captures whatever has loaded so far.
+fn auto_scroll(tab: &Tab, config: &RenderConfig, deadline: Instant) {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return;
+    }
+    let budget_ms = remaining.as_millis().min(u128::from(u64::MAX)) as u64;
+    let js = build_auto_scroll_js(config.max_scrolls, budget_ms);
+    let _ = tab.evaluate(&js, true);
+}
+
+/// Encode a string as a JSON string literal (also a valid JS string literal) so a selector can be
+/// embedded in an evaluated expression without breaking out of the quoting.
+fn js_string_literal(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+/// Execute a single scripted [`Action`], bounded by the render `deadline`.
+fn run_action(tab: &Tab, action: &Action, deadline: Instant) -> Result<(), RenderError> {
+    match action {
+        Action::Click { selector } => {
+            let js = format!(
+                "(function(){{var e=document.querySelector({});if(e){{e.click();return true;}}return false;}})()",
+                js_string_literal(selector)
+            );
+            let _ = tab.evaluate(&js, false);
+        }
+        Action::Scroll { direction } => {
+            let js = match direction {
+                ScrollDirection::Down => "window.scrollBy(0, window.innerHeight)",
+                ScrollDirection::Up => "window.scrollBy(0, -window.innerHeight)",
+            };
+            let _ = tab.evaluate(js, false);
+        }
+        Action::Wait { milliseconds } => {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            std::thread::sleep(Duration::from_millis(*milliseconds).min(remaining));
+        }
+        Action::WaitForSelector { selector } => {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(RenderError::WaitFor {
+                    selector: selector.clone(),
+                    detail: "render deadline exceeded".to_string(),
+                });
+            }
+            tab.wait_for_element_with_custom_timeout(selector, remaining)
+                .map_err(|e| RenderError::WaitFor {
+                    selector: selector.clone(),
+                    detail: e.to_string(),
+                })?;
+        }
+    }
+    Ok(())
 }
 
 /// Default screenshot viewport width (CSS px) when the caller does not specify one.
@@ -502,5 +824,81 @@ mod tests {
         if let Some(path) = resolved {
             assert_ne!(path, PathBuf::from("/definitely/not/a/real/chrome/binary"));
         }
+    }
+
+    #[test]
+    fn default_config_enables_advanced_navigation() {
+        let cfg = RenderConfig::default();
+        assert!(cfg.follow_client_redirects);
+        assert!(cfg.auto_scroll);
+        assert!(cfg.dismiss_consent);
+        assert!(cfg.actions.is_empty());
+        assert_eq!(cfg.max_redirects, DEFAULT_MAX_REDIRECTS);
+        assert_eq!(cfg.max_scrolls, DEFAULT_MAX_SCROLLS);
+    }
+
+    #[test]
+    fn actions_deserialize_from_tagged_json() {
+        let json = r##"[
+            {"type":"click","selector":"#more"},
+            {"type":"scroll"},
+            {"type":"scroll","direction":"up"},
+            {"type":"wait","milliseconds":250},
+            {"type":"waitForSelector","selector":".loaded"}
+        ]"##;
+        let actions: Vec<Action> = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                Action::Click {
+                    selector: "#more".to_string()
+                },
+                Action::Scroll {
+                    direction: ScrollDirection::Down
+                },
+                Action::Scroll {
+                    direction: ScrollDirection::Up
+                },
+                Action::Wait { milliseconds: 250 },
+                Action::WaitForSelector {
+                    selector: ".loaded".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn scroll_direction_defaults_to_down() {
+        assert_eq!(ScrollDirection::default(), ScrollDirection::Down);
+    }
+
+    #[test]
+    fn consent_js_matches_accept_controls_conservatively() {
+        assert!(CONSENT_DISMISS_JS.contains("cookie|consent|gdpr|privacy|cmp|banner"));
+        assert!(CONSENT_DISMISS_JS.contains("accept"));
+        assert!(CONSENT_DISMISS_JS.contains("fixed"));
+    }
+
+    #[test]
+    fn finalize_js_inlines_shadow_and_iframes_and_cleans() {
+        assert!(CLEAN_AND_SERIALIZE.contains("shadowRoot"));
+        assert!(CLEAN_AND_SERIALIZE.contains("contentDocument"));
+        assert!(CLEAN_AND_SERIALIZE.contains("iframe"));
+        assert!(CLEAN_AND_SERIALIZE.contains("script,style,noscript"));
+        assert!(CLEAN_AND_SERIALIZE.contains("outerHTML"));
+    }
+
+    #[test]
+    fn auto_scroll_js_embeds_bounds() {
+        let js = build_auto_scroll_js(7, 5000);
+        assert!(js.contains("MAX=7"));
+        assert!(js.contains("BUDGET=5000"));
+        assert!(js.contains("__bcInflight"));
+        assert!(js.contains("scrollTo"));
+    }
+
+    #[test]
+    fn js_string_literal_escapes_quotes() {
+        assert_eq!(js_string_literal("#a\"b"), "\"#a\\\"b\"");
     }
 }

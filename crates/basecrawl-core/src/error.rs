@@ -30,6 +30,9 @@ pub enum Error {
     #[error("invalid viewport '{0}' (expected WIDTHxHEIGHT, e.g. 1280x800)")]
     InvalidViewport(String),
 
+    #[error("invalid actions specification: {0}")]
+    InvalidActions(String),
+
     #[error("request timed out: {0}")]
     Timeout(String),
 
@@ -63,6 +66,7 @@ impl Error {
             Error::UnsupportedOutput(_) => "unsupported_output",
             Error::InvalidHeader(_) => "invalid_header",
             Error::InvalidViewport(_) => "invalid_viewport",
+            Error::InvalidActions(_) => "invalid_actions",
             Error::Timeout(_) => "timeout",
             Error::Transport(_) => "transport_error",
             Error::TooManyRedirects { .. } => "too_many_redirects",
