@@ -1,0 +1,16 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+
+# Secrets (never commit)
+.env
+.env.*
+*.secret
+.secrets.env
+
+# Disposable mission dev state
+/tmp/relay-dev/
+
+# Editor / OS
+.DS_Store
+*.swp

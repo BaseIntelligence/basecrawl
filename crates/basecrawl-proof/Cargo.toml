@@ -1,0 +1,11 @@
+[package]
+name = "basecrawl-proof"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Canonical ScrapeProof types and serialization for basecrawl"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
