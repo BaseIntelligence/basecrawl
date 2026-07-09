@@ -9,6 +9,7 @@
 pub mod error;
 pub mod fetch;
 pub mod format;
+pub mod markdown;
 pub mod url_validation;
 
 use basecrawl_proof::{
@@ -19,6 +20,7 @@ use fetch::{FetchConfig, DEFAULT_TIMEOUT_SECS, DEFAULT_USER_AGENT};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::time::Duration;
+use url::Url;
 
 pub use error::Error;
 pub use format::Format;
@@ -73,16 +75,17 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
         format::normalize(options.formats.clone())
     };
 
-    // Surface the decoded served source under `rawHtml` so header/User-Agent/decoding behavior is
-    // observable; richer html/markdown producers layer on in later features.
-    let raw_body = Value::String(String::from_utf8_lossy(&fetched.body).into_owned());
+    // The decoded served source, shared by the rawHtml passthrough and the markdown producer. The
+    // markdown base is the terminal (post-redirect) URL so relative links/images resolve correctly.
+    let body_str = String::from_utf8_lossy(&fetched.body);
+    let markdown_base = Url::parse(&fetched.final_url).unwrap_or_else(|_| url.clone());
     let formats_produced: BTreeMap<String, Value> = formats
         .iter()
         .map(|f| {
-            let value = if *f == Format::RawHtml {
-                raw_body.clone()
-            } else {
-                Value::Null
+            let value = match f {
+                Format::RawHtml => Value::String(body_str.clone().into_owned()),
+                Format::Markdown => Value::String(markdown::to_markdown(&body_str, &markdown_base)),
+                _ => Value::Null,
             };
             (f.as_str().to_string(), value)
         })
