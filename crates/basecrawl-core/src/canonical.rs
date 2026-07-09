@@ -212,11 +212,24 @@ mod tests {
     }
 
     #[test]
-    fn json_extract_is_excluded_too() {
+    fn json_extract_presence_and_contents_are_excluded() {
         let baseline = result_hash(&base_surface());
-        let mut with_json = base_surface();
-        with_json.insert("json".to_string(), json!({"extracted": "anything"}));
-        assert_eq!(baseline, result_hash(&with_json));
+        let mut with_first_json = base_surface();
+        with_first_json.insert(
+            "json".to_string(),
+            json!({"title": "First extraction", "items": [{"name": "one"}]}),
+        );
+        let mut with_second_json = base_surface();
+        with_second_json.insert(
+            "json".to_string(),
+            json!({"title": "Different extraction", "items": [{"name": "two"}, {"name": "three"}]}),
+        );
+        let mut with_null_json = base_surface();
+        with_null_json.insert("json".to_string(), Value::Null);
+
+        assert_eq!(baseline, result_hash(&with_first_json));
+        assert_eq!(baseline, result_hash(&with_second_json));
+        assert_eq!(baseline, result_hash(&with_null_json));
     }
 
     #[test]

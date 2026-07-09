@@ -27,6 +27,21 @@ struct Cli {
     #[arg(long, value_delimiter = ',', value_name = "FORMATS")]
     formats: Option<Vec<String>>,
 
+    /// JSON Schema describing the requested structured extraction. The current deterministic
+    /// image accepts this request syntax but explicitly reports JSON extraction as unavailable.
+    #[arg(
+        long = "json-schema",
+        visible_alias = "schema",
+        value_name = "JSON_SCHEMA"
+    )]
+    json_schema: Option<String>,
+
+    /// Natural-language instruction for the requested structured extraction. The current
+    /// deterministic image accepts this request syntax but explicitly reports JSON extraction as
+    /// unavailable.
+    #[arg(long = "json-prompt", visible_alias = "prompt", value_name = "PROMPT")]
+    json_prompt: Option<String>,
+
     /// Validator-issued task identifier, echoed verbatim into the ScrapeProof.
     #[arg(long, value_name = "TASK_ID")]
     task_id: Option<String>,
@@ -114,6 +129,7 @@ fn run(cli: Cli) -> Result<String, Error> {
     }
 
     let raw_url = cli.url.ok_or(Error::MissingUrl)?;
+    let _json_extraction_request = (cli.json_schema, cli.json_prompt);
 
     // Validate formats before any fetch so an unknown format never triggers a network request.
     let mut formats = match &cli.formats {

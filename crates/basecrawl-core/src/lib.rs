@@ -129,6 +129,13 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
         format::normalize(options.formats.clone())
     };
 
+    // JSON structured extraction depends on an optional LLM-backed capability that is not part of
+    // this deterministic M1 image. Refuse it before robots/fetch/render work so callers never
+    // receive a successful proof that misleadingly contains `json: null`.
+    if formats.contains(&Format::Json) {
+        return Err(Error::StructuredExtractionUnsupported);
+    }
+
     let config = FetchConfig {
         timeout: Duration::from_secs(options.timeout_secs),
         headers: options.headers.clone(),

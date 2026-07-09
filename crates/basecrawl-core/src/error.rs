@@ -24,6 +24,9 @@ pub enum Error {
     #[error("unsupported output format '{0}' (only 'json' is supported)")]
     UnsupportedOutput(String),
 
+    #[error("structured extraction for the 'json' format is unavailable in this build")]
+    StructuredExtractionUnsupported,
+
     #[error("invalid request header '{0}' (expected 'Name: Value')")]
     InvalidHeader(String),
 
@@ -79,6 +82,7 @@ impl Error {
             Error::UnsupportedScheme(_) => "unsupported_scheme",
             Error::UnknownFormat { .. } => "invalid_format",
             Error::UnsupportedOutput(_) => "unsupported_output",
+            Error::StructuredExtractionUnsupported => "structured_extraction_unsupported",
             Error::InvalidHeader(_) => "invalid_header",
             Error::InvalidViewport(_) => "invalid_viewport",
             Error::InvalidActions(_) => "invalid_actions",
@@ -113,6 +117,14 @@ impl Error {
             }
             Error::UnsupportedScheme(scheme) => {
                 obj.insert("scheme".into(), Value::String(scheme.clone()));
+            }
+            Error::StructuredExtractionUnsupported => {
+                obj.insert("format".into(), Value::String("json".into()));
+                obj.insert(
+                    "capability".into(),
+                    Value::String("structured_extraction".into()),
+                );
+                obj.insert("reason".into(), Value::String("not_built".into()));
             }
             Error::TooManyRedirects { max, .. } => {
                 obj.insert("max_redirects".into(), Value::Number((*max).into()));
