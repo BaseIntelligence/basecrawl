@@ -10,6 +10,7 @@ pub mod error;
 pub mod fetch;
 pub mod format;
 pub mod html;
+pub mod links;
 pub mod markdown;
 pub mod url_validation;
 
@@ -76,10 +77,11 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
         format::normalize(options.formats.clone())
     };
 
-    // The decoded served source, shared by the rawHtml passthrough and the markdown producer. The
-    // markdown base is the terminal (post-redirect) URL so relative links/images resolve correctly.
+    // The decoded served source, shared by the rawHtml passthrough and the markdown/links
+    // producers. The resolution base is the terminal (post-redirect) URL so relative links/images
+    // resolve correctly; a document `<base href>` overrides it inside each producer.
     let body_str = String::from_utf8_lossy(&fetched.body);
-    let markdown_base = Url::parse(&fetched.final_url).unwrap_or_else(|_| url.clone());
+    let page_base = Url::parse(&fetched.final_url).unwrap_or_else(|_| url.clone());
 
     // `rawHtml` is the served source (no render); `html` is the cleaned, post-render DOM. Rendering
     // is triggered only when `html` is requested, so a rawHtml-only scrape never launches a browser.
@@ -87,10 +89,12 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
     for f in &formats {
         let value = match f {
             Format::RawHtml => Value::String(body_str.clone().into_owned()),
-            Format::Markdown => Value::String(markdown::to_markdown(&body_str, &markdown_base)),
+            Format::Markdown => Value::String(markdown::to_markdown(&body_str, &page_base)),
             Format::Html => {
                 Value::String(html::render_html(&url, &config.user_agent, config.timeout)?)
             }
+            Format::Links => serde_json::to_value(links::extract(&body_str, &page_base))
+                .expect("links surface is always serializable"),
             _ => Value::Null,
         };
         formats_produced.insert(f.as_str().to_string(), value);
