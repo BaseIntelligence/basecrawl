@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 project(basecrawl_c_sdk LANGUAGES C)
 
 enable_testing()
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 find_library(
   BASECRAWL_FFI_LIBRARY
@@ -38,4 +39,25 @@ add_test(
     -DPROGRAM=$<TARGET_FILE:basecrawl-c-example>
     -DCLI=${BASECRAWL_CLI}
     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/assert_parity.cmake
+)
+
+add_test(
+  NAME basecrawl-c-semantics-and-version-parity
+  COMMAND ${CMAKE_COMMAND}
+    -DPROGRAM=$<TARGET_FILE:basecrawl-c-example>
+    -DCLI=${BASECRAWL_CLI}
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/assert_semantics.cmake
+)
+
+add_test(
+  NAME basecrawl-all-bindings-canonical-wire-parity
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/assert_all_bindings_parity.py
+    --cli ${BASECRAWL_CLI}
+    --c-program $<TARGET_FILE:basecrawl-c-example>
+    --node-dir ${CMAKE_CURRENT_SOURCE_DIR}/../node
+)
+set_tests_properties(
+  basecrawl-all-bindings-canonical-wire-parity
+  PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../python/python"
 )

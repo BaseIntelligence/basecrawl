@@ -370,6 +370,7 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
     let completeness_manifest = canonical::completeness_manifest(&format_names, &formats_produced);
     let manifest_sha256 =
         canonical::manifest_sha256(url.as_str(), options.nonce.as_deref(), &result_hash);
+    let egress = egress::build(fetched.egress_ip, fetched.fetched_at, &request_hash)?;
 
     Ok(ScrapeProof {
         version: SCRAPE_PROOF_VERSION,
@@ -407,7 +408,7 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
             manifest_sha256: Some(manifest_sha256),
             crawled_urls,
         },
-        egress: egress::build(fetched.egress_ip, fetched.fetched_at)?,
+        egress,
         attestation: Attestation::default(),
         sdk_signature: SdkSignature::default(),
     })

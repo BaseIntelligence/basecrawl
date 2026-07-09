@@ -4,6 +4,16 @@
 #include <string.h>
 
 int main(int argc, char **argv) {
+  if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+    const char *version = basecrawl_version();
+    if (strcmp(version, BASECRAWL_VERSION) != 0) {
+      fputs("C header and runtime versions differ\n", stderr);
+      return 2;
+    }
+    puts(BASECRAWL_VERSION);
+    return 0;
+  }
+
   const char *url = argc > 1 ? argv[1] : "https://example.com";
   const char *options_json = NULL;
   char options_buffer[128];

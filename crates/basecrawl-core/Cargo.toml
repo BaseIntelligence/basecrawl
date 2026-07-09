@@ -34,7 +34,6 @@ scraper.workspace = true
 ego-tree.workspace = true
 base64.workspace = true
 encoding_rs.workspace = true
-getrandom.workspace = true
 time.workspace = true
 quick-xml.workspace = true
 pdf-extract.workspace = true
