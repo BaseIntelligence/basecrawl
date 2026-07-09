@@ -9,6 +9,7 @@
 pub mod error;
 pub mod fetch;
 pub mod format;
+pub mod html;
 pub mod markdown;
 pub mod url_validation;
 
@@ -79,17 +80,21 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
     // markdown base is the terminal (post-redirect) URL so relative links/images resolve correctly.
     let body_str = String::from_utf8_lossy(&fetched.body);
     let markdown_base = Url::parse(&fetched.final_url).unwrap_or_else(|_| url.clone());
-    let formats_produced: BTreeMap<String, Value> = formats
-        .iter()
-        .map(|f| {
-            let value = match f {
-                Format::RawHtml => Value::String(body_str.clone().into_owned()),
-                Format::Markdown => Value::String(markdown::to_markdown(&body_str, &markdown_base)),
-                _ => Value::Null,
-            };
-            (f.as_str().to_string(), value)
-        })
-        .collect();
+
+    // `rawHtml` is the served source (no render); `html` is the cleaned, post-render DOM. Rendering
+    // is triggered only when `html` is requested, so a rawHtml-only scrape never launches a browser.
+    let mut formats_produced: BTreeMap<String, Value> = BTreeMap::new();
+    for f in &formats {
+        let value = match f {
+            Format::RawHtml => Value::String(body_str.clone().into_owned()),
+            Format::Markdown => Value::String(markdown::to_markdown(&body_str, &markdown_base)),
+            Format::Html => {
+                Value::String(html::render_html(&url, &config.user_agent, config.timeout)?)
+            }
+            _ => Value::Null,
+        };
+        formats_produced.insert(f.as_str().to_string(), value);
+    }
 
     Ok(ScrapeProof {
         version: SCRAPE_PROOF_VERSION,

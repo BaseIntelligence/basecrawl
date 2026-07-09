@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/basecrawl-core",
     "crates/basecrawl-proof",
+    "crates/basecrawl-render",
 ]
 
 [workspace.package]
@@ -21,6 +22,7 @@ sha2 = "0.10"
 thiserror = "2"
 scraper = "0.27"
 ego-tree = "0.11"
+headless_chrome = "1"
 
 [profile.release]
 opt-level = 3

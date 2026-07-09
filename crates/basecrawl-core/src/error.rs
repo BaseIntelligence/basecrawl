@@ -41,6 +41,9 @@ pub enum Error {
 
     #[error("fetch failed: {0}")]
     Fetch(String),
+
+    #[error("html render failed: {0}")]
+    Render(String),
 }
 
 impl Error {
@@ -58,6 +61,7 @@ impl Error {
             Error::TooManyRedirects { .. } => "too_many_redirects",
             Error::Redirect(_) => "redirect_error",
             Error::Fetch(_) => "fetch_error",
+            Error::Render(_) => "render_error",
         }
     }
 
