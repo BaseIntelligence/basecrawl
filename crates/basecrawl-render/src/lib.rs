@@ -8,12 +8,19 @@
 //! Rendering is deliberately kept separate from the HTTP fetch path so that formats which only need
 //! the served source (e.g. `rawHtml`) never pay for, or depend on, a browser launch.
 
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
-use headless_chrome::protocol::cdp::{Emulation, Page};
+use headless_chrome::browser::tab::RequestPausedDecision;
+use headless_chrome::protocol::cdp::{
+    Emulation, Fetch,
+    Network::{ErrorReason, ResourceType},
+    Page,
+};
 use headless_chrome::{Browser, LaunchOptions, Tab};
 use serde::Deserialize;
 use url::Url;
@@ -31,6 +38,20 @@ pub const DEFAULT_MAX_REDIRECTS: usize = 20;
 /// Default maximum number of auto-scroll steps used to collect infinite-scroll / lazy-loaded
 /// content before giving up (each step is also bounded by the render deadline).
 pub const DEFAULT_MAX_SCROLLS: usize = 15;
+
+/// Default cap on the number of browser subresources accepted during one rendered DOM capture.
+///
+/// The top-level document is excluded because basecrawl's direct fetch already applies its
+/// `max_body_bytes` cap before Chromium is launched. Every image, stylesheet, script, font, XHR,
+/// and similar browser subresource is counted.
+pub const DEFAULT_MAX_RENDER_SUBRESOURCES: usize = 128;
+
+/// Default cap on cumulative accepted subresource bytes during one rendered DOM capture.
+///
+/// CDP intercepts each response before its body is consumed, so a declared `Content-Length` that
+/// would carry the aggregate beyond this cap is blocked. Resources without a declared length are
+/// still bounded by the independent subresource count cap.
+pub const DEFAULT_MAX_RENDER_BYTES: u64 = 20 * 1024 * 1024;
 
 /// Candidate Chromium executables searched (in order) when `CHROME` is unset.
 const CHROME_CANDIDATES: &[&str] = &[
@@ -102,6 +123,15 @@ pub struct RenderConfig {
     pub timeout: Duration,
     /// User-Agent presented to the origin (kept in parity with the HTTP fetch path).
     pub user_agent: String,
+    /// Additional request headers, including M1 cleartext cookies and authorization values, sent
+    /// to the rendered document and every browser subresource.
+    pub request_headers: Vec<(String, String)>,
+    /// Minimum interval between browser requests to one scheme/host/port origin.
+    pub crawl_delay: Duration,
+    /// Maximum non-document requests accepted during this render.
+    pub max_subresources: usize,
+    /// Maximum sum of accepted declared subresource response bytes during this render.
+    pub max_resource_bytes: u64,
     /// When set, capture is blocked until an element matching this CSS selector exists (bounded by
     /// `timeout`). When present it takes precedence over the network-idle wait.
     pub wait_for: Option<String>,
@@ -131,6 +161,10 @@ impl Default for RenderConfig {
         Self {
             timeout: Duration::from_secs(DEFAULT_RENDER_TIMEOUT_SECS),
             user_agent: String::new(),
+            request_headers: Vec::new(),
+            crawl_delay: Duration::ZERO,
+            max_subresources: DEFAULT_MAX_RENDER_SUBRESOURCES,
+            max_resource_bytes: DEFAULT_MAX_RENDER_BYTES,
             wait_for: None,
             network_idle: true,
             quiet_period: Duration::from_millis(DEFAULT_NETWORK_IDLE_QUIET_MS),
@@ -149,6 +183,32 @@ impl Default for RenderConfig {
 pub struct Rendered {
     /// The cleaned, post-render DOM serialization (see [`render`] for the cleaning policy).
     pub html: String,
+    /// Observable aggregate resource accounting for this browser render.
+    pub resource_usage: RenderResourceUsage,
+}
+
+/// Browser subresource accounting and cap outcome surfaced by the core proof response block.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RenderResourceUsage {
+    /// Number of non-document browser requests accepted by the cap guard.
+    pub subresource_count: u64,
+    /// Sum of declared `Content-Length` values for accepted browser subresource responses.
+    pub resource_bytes: u64,
+    /// Whether a request or response was blocked due to either configured aggregate cap.
+    pub cap_exceeded: bool,
+}
+
+#[derive(Debug, Default)]
+struct RenderResourceState {
+    usage: RenderResourceUsage,
+    last_request_at: HashMap<RenderOrigin, Instant>,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct RenderOrigin {
+    scheme: String,
+    host: String,
+    port: u16,
 }
 
 /// Resolve a Chromium executable: prefer `$CHROME`, then the well-known system locations.
@@ -163,6 +223,110 @@ fn resolve_chrome() -> Option<PathBuf> {
         .iter()
         .map(PathBuf::from)
         .find(|p| p.exists())
+}
+
+/// Configure per-origin pacing and aggregate subresource caps before page navigation starts.
+///
+/// Fetch interception pauses every non-document request before it is sent, allowing the count cap
+/// and per-origin delay to prevent a request from reaching the origin. Response-stage interception
+/// happens after headers but before the body is consumed, so a declared content length that would
+/// exceed the cumulative cap is cancelled before it is downloaded.
+fn configure_resource_guard(
+    tab: &Tab,
+    config: &RenderConfig,
+    state: Arc<Mutex<RenderResourceState>>,
+) -> Result<(), RenderError> {
+    let patterns = [
+        Fetch::RequestPattern {
+            url_pattern: None,
+            resource_Type: None,
+            request_stage: Some(Fetch::RequestStage::Request),
+        },
+        Fetch::RequestPattern {
+            url_pattern: None,
+            resource_Type: None,
+            request_stage: Some(Fetch::RequestStage::Response),
+        },
+    ];
+    tab.enable_fetch(Some(&patterns), None)
+        .map_err(|error| RenderError::Render(error.to_string()))?;
+
+    let crawl_delay = config.crawl_delay;
+    let max_subresources = config.max_subresources as u64;
+    let max_resource_bytes = config.max_resource_bytes;
+    tab.enable_request_interception(Arc::new(
+        move |_transport, _session_id, paused: Fetch::events::RequestPausedEvent| {
+            let is_document = paused.params.resource_Type == ResourceType::Document;
+            if paused.params.response_status_code.is_some() {
+                if is_document {
+                    return RequestPausedDecision::Continue(None);
+                }
+                let declared_bytes = paused
+                    .params
+                    .response_headers
+                    .as_deref()
+                    .and_then(declared_content_length)
+                    .unwrap_or(0);
+                let mut guard = state
+                    .lock()
+                    .expect("render resource guard mutex must not be poisoned");
+                if guard.usage.resource_bytes.saturating_add(declared_bytes) > max_resource_bytes {
+                    guard.usage.cap_exceeded = true;
+                    return RequestPausedDecision::Fail(Fetch::FailRequest {
+                        request_id: paused.params.request_id,
+                        error_reason: ErrorReason::BlockedByClient,
+                    });
+                }
+                guard.usage.resource_bytes += declared_bytes;
+                return RequestPausedDecision::Continue(None);
+            }
+
+            let origin = origin_for_url(&paused.params.request.url);
+            let mut guard = state
+                .lock()
+                .expect("render resource guard mutex must not be poisoned");
+            if let Some(origin) = origin {
+                if !crawl_delay.is_zero() {
+                    if let Some(previous) = guard.last_request_at.get(&origin) {
+                        let elapsed = previous.elapsed();
+                        if elapsed < crawl_delay {
+                            std::thread::sleep(crawl_delay - elapsed);
+                        }
+                    }
+                }
+                guard.last_request_at.insert(origin, Instant::now());
+            }
+            if is_document {
+                return RequestPausedDecision::Continue(None);
+            }
+            if guard.usage.subresource_count >= max_subresources {
+                guard.usage.cap_exceeded = true;
+                return RequestPausedDecision::Fail(Fetch::FailRequest {
+                    request_id: paused.params.request_id,
+                    error_reason: ErrorReason::BlockedByClient,
+                });
+            }
+            guard.usage.subresource_count += 1;
+            RequestPausedDecision::Continue(None)
+        },
+    ))
+    .map_err(|error| RenderError::Render(error.to_string()))
+}
+
+fn origin_for_url(raw_url: &str) -> Option<RenderOrigin> {
+    let url = Url::parse(raw_url).ok()?;
+    Some(RenderOrigin {
+        scheme: url.scheme().to_ascii_lowercase(),
+        host: url.host_str()?.to_ascii_lowercase(),
+        port: url.port_or_known_default()?,
+    })
+}
+
+fn declared_content_length(headers: &[Fetch::HeaderEntry]) -> Option<u64> {
+    headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("content-length"))
+        .and_then(|header| header.value.trim().parse().ok())
 }
 
 /// Launch a headless Chromium with the shared flag set used by every rendering path.
@@ -376,6 +540,17 @@ pub fn render(url: &Url, config: &RenderConfig) -> Result<Rendered, RenderError>
         tab.set_user_agent(&config.user_agent, None, None)
             .map_err(|e| RenderError::Render(e.to_string()))?;
     }
+    if !config.request_headers.is_empty() {
+        let headers: HashMap<&str, &str> = config
+            .request_headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        tab.set_extra_http_headers(headers)
+            .map_err(|e| RenderError::Render(e.to_string()))?;
+    }
+    let resource_state = Arc::new(Mutex::new(RenderResourceState::default()));
+    configure_resource_guard(&tab, config, Arc::clone(&resource_state))?;
 
     // Install the network in-flight tracker before any page script runs so the smart wait can see
     // fetch/XHR the page issues, including deferred requests.
@@ -437,7 +612,17 @@ pub fn render(url: &Url, config: &RenderConfig) -> Result<Rendered, RenderError>
         .map_err(|e| RenderError::Render(e.to_string()))?;
 
     match evaluated.value {
-        Some(serde_json::Value::String(html)) if !html.is_empty() => Ok(Rendered { html }),
+        Some(serde_json::Value::String(html)) if !html.is_empty() => {
+            let resource_usage = resource_state
+                .lock()
+                .expect("render resource guard mutex must not be poisoned")
+                .usage
+                .clone();
+            Ok(Rendered {
+                html,
+                resource_usage,
+            })
+        }
         _ => Err(RenderError::NoContent),
     }
 }
@@ -632,6 +817,14 @@ pub struct ScreenshotConfig {
     pub timeout: Duration,
     /// User-Agent presented to the origin (kept in parity with the HTTP fetch path).
     pub user_agent: String,
+    /// Additional request headers, including M1 cleartext credentials, sent during capture.
+    pub request_headers: Vec<(String, String)>,
+    /// Minimum interval between browser requests to one origin during capture.
+    pub crawl_delay: Duration,
+    /// Maximum non-document requests accepted during capture.
+    pub max_subresources: usize,
+    /// Maximum sum of accepted declared subresource response bytes during capture.
+    pub max_resource_bytes: u64,
     /// Layout viewport width in CSS pixels. Captured at device-scale-factor 1, so the produced
     /// image width equals this value exactly.
     pub width: u32,
@@ -647,6 +840,10 @@ impl Default for ScreenshotConfig {
         Self {
             timeout: Duration::from_secs(DEFAULT_RENDER_TIMEOUT_SECS),
             user_agent: String::new(),
+            request_headers: Vec::new(),
+            crawl_delay: Duration::ZERO,
+            max_subresources: DEFAULT_MAX_RENDER_SUBRESOURCES,
+            max_resource_bytes: DEFAULT_MAX_RENDER_BYTES,
             width: DEFAULT_VIEWPORT_WIDTH,
             height: DEFAULT_VIEWPORT_HEIGHT,
             full_page: false,
@@ -661,6 +858,8 @@ pub struct Screenshot {
     pub png: Vec<u8>,
     /// Standard base64 encoding of [`Screenshot::png`] (the form embedded in the ScrapeProof).
     pub base64: String,
+    /// Aggregate browser-resource accounting for this capture.
+    pub resource_usage: RenderResourceUsage,
 }
 
 /// The full scrollable content height (CSS px) of the currently-loaded document.
@@ -699,6 +898,23 @@ pub fn screenshot(url: &Url, config: &ScreenshotConfig) -> Result<Screenshot, Re
         tab.set_user_agent(&config.user_agent, None, None)
             .map_err(|e| RenderError::Render(e.to_string()))?;
     }
+    if !config.request_headers.is_empty() {
+        let headers: HashMap<&str, &str> = config
+            .request_headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        tab.set_extra_http_headers(headers)
+            .map_err(|e| RenderError::Render(e.to_string()))?;
+    }
+    let resource_state = Arc::new(Mutex::new(RenderResourceState::default()));
+    let resource_config = RenderConfig {
+        crawl_delay: config.crawl_delay,
+        max_subresources: config.max_subresources,
+        max_resource_bytes: config.max_resource_bytes,
+        ..RenderConfig::default()
+    };
+    configure_resource_guard(&tab, &resource_config, Arc::clone(&resource_state))?;
 
     tab.call_method(Emulation::SetDeviceMetricsOverride {
         width: config.width,
@@ -754,7 +970,16 @@ pub fn screenshot(url: &Url, config: &ScreenshotConfig) -> Result<Screenshot, Re
     if png.is_empty() {
         return Err(RenderError::NoContent);
     }
-    Ok(Screenshot { png, base64: data })
+    let resource_usage = resource_state
+        .lock()
+        .expect("render resource guard mutex must not be poisoned")
+        .usage
+        .clone();
+    Ok(Screenshot {
+        png,
+        base64: data,
+        resource_usage,
+    })
 }
 
 #[cfg(test)]

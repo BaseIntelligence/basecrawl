@@ -70,7 +70,12 @@
         "body_truncated",
         "body_max_bytes",
         "final_url",
-        "redirect_chain"
+        "redirect_chain",
+        "render_subresource_count",
+        "render_subresource_max_count",
+        "render_resource_bytes",
+        "render_max_bytes",
+        "render_resource_cap_exceeded"
       ],
       "properties": {
         "status_code": { "type": ["integer", "null"], "minimum": 100, "maximum": 599 },
@@ -93,7 +98,12 @@
               "location": { "type": "string", "format": "uri" }
             }
           }
-        }
+        },
+        "render_subresource_count": { "type": "integer", "minimum": 0 },
+        "render_subresource_max_count": { "type": "integer", "minimum": 0 },
+        "render_resource_bytes": { "type": "integer", "minimum": 0 },
+        "render_max_bytes": { "type": "integer", "minimum": 0 },
+        "render_resource_cap_exceeded": { "type": "boolean" }
       }
     },
     "result": {

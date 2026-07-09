@@ -54,6 +54,18 @@ struct Cli {
     #[arg(long = "header", value_name = "HEADER")]
     headers: Vec<String>,
 
+    /// Session cookie `NAME=VALUE`, repeatable. Cookies are sent in the clear at M1.
+    #[arg(long = "cookie", value_name = "NAME=VALUE")]
+    cookies: Vec<String>,
+
+    /// Value for the HTTP Authorization header, e.g. `Bearer TOKEN`. Sent in the clear at M1.
+    #[arg(long = "auth-header", value_name = "VALUE")]
+    auth_header: Option<String>,
+
+    /// HTTP Basic credentials `USERNAME:PASSWORD`. Sent in the clear at M1.
+    #[arg(long = "basic-auth", value_name = "USERNAME:PASSWORD")]
+    basic_auth: Option<String>,
+
     /// Whole-request timeout in seconds; a slower endpoint aborts near this bound.
     #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS, value_name = "SECONDS")]
     timeout: u64,
@@ -62,6 +74,21 @@ struct Cli {
     /// this cap are truncated and reported as response.body_truncated=true in the ScrapeProof.
     #[arg(long, default_value_t = DEFAULT_MAX_BODY_BYTES, value_name = "BYTES")]
     max_body_bytes: usize,
+
+    /// Minimum millisecond delay between requests to the same scheme/host/port origin, including
+    /// redirects, robots, sitemap, pagination, and browser subresources.
+    #[arg(long, default_value_t = 0, value_name = "MILLISECONDS")]
+    crawl_delay_ms: u64,
+
+    /// Maximum browser subresources accepted while rendering [default: 128]. Excess requests are
+    /// blocked and response.render_resource_cap_exceeded is set in the ScrapeProof.
+    #[arg(long, default_value_t = 128, value_name = "N")]
+    max_render_subresources: usize,
+
+    /// Maximum cumulative declared browser subresource bytes accepted while rendering [default:
+    /// 20971520]. Responses that would exceed it are blocked and the proof indicates the cap.
+    #[arg(long, default_value_t = 20 * 1024 * 1024, value_name = "BYTES")]
+    max_render_bytes: u64,
 
     /// Explicitly bypass TLS certificate validation. This is disabled by default and is intended
     /// only for diagnostic capture of an invalid-certificate endpoint.
@@ -148,11 +175,40 @@ fn run(cli: Cli) -> Result<String, Error> {
     let viewport = screenshot::parse_viewport(&cli.viewport)?;
 
     // Parse custom headers before any fetch so a malformed header never triggers a network request.
-    let headers = cli
+    let mut headers = cli
         .headers
         .iter()
         .map(|spec| parse_header(spec))
         .collect::<Result<Vec<_>, _>>()?;
+    if !cli.cookies.is_empty() {
+        if cli
+            .cookies
+            .iter()
+            .any(|cookie| !cookie.contains('=') || cookie.starts_with('='))
+        {
+            return Err(Error::InvalidHeader("Cookie".to_string()));
+        }
+        set_header(&mut headers, "Cookie", cli.cookies.join("; "));
+    }
+    if let Some(auth_header) = cli.auth_header {
+        if auth_header.trim().is_empty() {
+            return Err(Error::InvalidHeader("Authorization".to_string()));
+        }
+        set_header(&mut headers, "Authorization", auth_header);
+    }
+    if let Some(basic_auth) = cli.basic_auth {
+        let (username, password) = basic_auth
+            .split_once(':')
+            .ok_or_else(|| Error::InvalidHeader("basic-auth".to_string()))?;
+        if username.is_empty() {
+            return Err(Error::InvalidHeader("basic-auth".to_string()));
+        }
+        let value = format!(
+            "Basic {}",
+            base64::prelude::BASE64_STANDARD.encode(format!("{username}:{password}"))
+        );
+        set_header(&mut headers, "Authorization", value);
+    }
 
     // Parse scripted actions before any fetch so a malformed spec never triggers a network request.
     let actions = match &cli.actions {
@@ -169,6 +225,9 @@ fn run(cli: Cli) -> Result<String, Error> {
         headers,
         insecure: cli.insecure,
         max_body_bytes: cli.max_body_bytes,
+        crawl_delay_ms: cli.crawl_delay_ms,
+        max_render_subresources: cli.max_render_subresources,
+        max_render_bytes: cli.max_render_bytes,
         viewport,
         screenshot_full_page: cli.screenshot_full_page,
         render_enabled: !cli.no_js,
@@ -193,6 +252,15 @@ fn run(cli: Cli) -> Result<String, Error> {
     }
 
     Ok(proof.to_canonical_json())
+}
+
+/// Add a caller convenience credential header without allowing duplicate sensitive header names.
+///
+/// A later explicit credential flag wins over a same-named generic `--header`, matching normal CLI
+/// override behavior while keeping each request's header surface unambiguous.
+fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: String) {
+    headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
+    headers.push((name.to_string(), value));
 }
 
 /// Write a completion event without exposing request or response plaintext.

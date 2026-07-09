@@ -4,8 +4,6 @@
 //! in `result.formats_produced.screenshot`. The screenshot is deliberately outside the
 //! deterministic `result_hash` surface (see [`crate::canonical`]).
 
-use std::time::Duration;
-
 use basecrawl_render::{screenshot, Screenshot, ScreenshotConfig};
 use url::Url;
 
@@ -14,20 +12,7 @@ use crate::error::Error;
 /// Capture a screenshot of `url` at the requested viewport, returning the decoded PNG plus its
 /// base64 wire form. A capture failure is surfaced as a structured [`Error`] so the scrape fails
 /// loudly rather than emitting a misleading screenshot value.
-pub fn capture(
-    url: &Url,
-    user_agent: &str,
-    timeout: Duration,
-    viewport: (u32, u32),
-    full_page: bool,
-) -> Result<Screenshot, Error> {
-    let config = ScreenshotConfig {
-        timeout,
-        user_agent: user_agent.to_string(),
-        width: viewport.0,
-        height: viewport.1,
-        full_page,
-    };
+pub fn capture(url: &Url, config: ScreenshotConfig) -> Result<Screenshot, Error> {
     screenshot(url, &config).map_err(|e| Error::Render(e.to_string()))
 }
 

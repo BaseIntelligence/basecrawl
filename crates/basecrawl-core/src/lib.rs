@@ -64,6 +64,13 @@ pub struct ScrapeOptions {
     /// Maximum decoded response-body bytes retained in memory. Responses beyond this cap are
     /// truncated and signaled in the ScrapeProof response block.
     pub max_body_bytes: usize,
+    /// Minimum spacing between physical requests to the same origin, including robots, redirects,
+    /// sitemap discovery, pagination, and browser subresources.
+    pub crawl_delay_ms: u64,
+    /// Maximum browser subresources accepted while producing the rendered DOM.
+    pub max_render_subresources: usize,
+    /// Maximum sum of declared browser subresource response bytes accepted during one render.
+    pub max_render_bytes: u64,
     /// Screenshot viewport as `(width, height)` in CSS pixels (device-scale-factor 1).
     pub viewport: (u32, u32),
     /// When true, `screenshot` captures the full scrollable page rather than just the viewport.
@@ -100,6 +107,9 @@ impl Default for ScrapeOptions {
             headers: Vec::new(),
             insecure: false,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            crawl_delay_ms: 0,
+            max_render_subresources: basecrawl_render::DEFAULT_MAX_RENDER_SUBRESOURCES,
+            max_render_bytes: basecrawl_render::DEFAULT_MAX_RENDER_BYTES,
             viewport: (
                 basecrawl_render::DEFAULT_VIEWPORT_WIDTH,
                 basecrawl_render::DEFAULT_VIEWPORT_HEIGHT,
@@ -142,6 +152,8 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
         user_agent: DEFAULT_USER_AGENT.to_string(),
         insecure: options.insecure,
         max_body_bytes: options.max_body_bytes,
+        crawl_delay: Duration::from_millis(options.crawl_delay_ms),
+        ..FetchConfig::default()
     };
     let robots_decision = robots::consult(&url, &config, options.robots_policy);
     if robots_decision.denies_fetch() {
@@ -200,18 +212,31 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
     let needs_render = formats
         .iter()
         .any(|f| matches!(f, Format::Markdown | Format::Html));
+    let mut render_resource_usage = basecrawl_render::RenderResourceUsage::default();
     let rendered_html: Option<String> = if options.render_enabled
         && needs_render
         && content_kind == ContentKind::Html
         && !body_str.trim().is_empty()
     {
-        Some(html::render_page(
+        config.wait_for_origin(&url);
+        let mut rendered = html::render_page(
             &url,
-            &config.user_agent,
-            Duration::from_secs(options.render_timeout_secs),
-            options.wait_for.as_deref(),
-            &options.actions,
-        )?)
+            basecrawl_render::RenderConfig {
+                timeout: Duration::from_secs(options.render_timeout_secs),
+                user_agent: config.user_agent.clone(),
+                request_headers: config.headers.clone(),
+                crawl_delay: config.crawl_delay,
+                max_subresources: options.max_render_subresources,
+                max_resource_bytes: options.max_render_bytes,
+                wait_for: options.wait_for.clone(),
+                actions: options.actions.clone(),
+                max_redirects: fetch::MAX_REDIRECTS,
+                ..basecrawl_render::RenderConfig::default()
+            },
+        )?;
+        redact_sensitive_request_echoes(&mut rendered.html, &config.headers);
+        render_resource_usage = rendered.resource_usage;
+        Some(rendered.html)
     } else {
         None
     };
@@ -259,13 +284,31 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
                 value
             }
             Format::Screenshot => {
+                config.wait_for_origin(&url);
                 let shot = screenshot::capture(
                     &url,
-                    &config.user_agent,
-                    config.timeout,
-                    options.viewport,
-                    options.screenshot_full_page,
+                    basecrawl_render::ScreenshotConfig {
+                        timeout: config.timeout,
+                        user_agent: config.user_agent.clone(),
+                        request_headers: config.headers.clone(),
+                        crawl_delay: config.crawl_delay,
+                        max_subresources: options.max_render_subresources,
+                        max_resource_bytes: options.max_render_bytes,
+                        width: options.viewport.0,
+                        height: options.viewport.1,
+                        full_page: options.screenshot_full_page,
+                    },
                 )?;
+                render_resource_usage.subresource_count = render_resource_usage
+                    .subresource_count
+                    .saturating_add(shot.resource_usage.subresource_count);
+                render_resource_usage.resource_bytes = render_resource_usage
+                    .resource_bytes
+                    .saturating_add(shot.resource_usage.resource_bytes);
+                render_resource_usage.cap_exceeded |= shot.resource_usage.cap_exceeded
+                    || render_resource_usage.subresource_count
+                        > options.max_render_subresources as u64
+                    || render_resource_usage.resource_bytes > options.max_render_bytes;
                 Value::String(shot.base64)
             }
             _ => Value::Null,
@@ -351,6 +394,11 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
             body_max_bytes: Some(options.max_body_bytes as u64),
             final_url: Some(fetched.final_url),
             redirect_chain: fetched.redirects,
+            render_subresource_count: render_resource_usage.subresource_count,
+            render_subresource_max_count: options.max_render_subresources as u64,
+            render_resource_bytes: render_resource_usage.resource_bytes,
+            render_max_bytes: options.max_render_bytes,
+            render_resource_cap_exceeded: render_resource_usage.cap_exceeded,
         },
         result: ResultBlock {
             formats_produced,
@@ -380,13 +428,23 @@ fn crawl_page(
     redact_sensitive_request_echoes(&mut body_str, &config.headers);
     let page_base = Url::parse(&fetched.final_url).unwrap_or_else(|_| url.clone());
     let source = if options.render_enabled && is_html && !body_str.trim().is_empty() {
-        html::render_page(
+        config.wait_for_origin(url);
+        let mut rendered = html::render_page(
             url,
-            &config.user_agent,
-            Duration::from_secs(options.render_timeout_secs),
-            options.wait_for.as_deref(),
-            &[],
-        )?
+            basecrawl_render::RenderConfig {
+                timeout: Duration::from_secs(options.render_timeout_secs),
+                user_agent: config.user_agent.clone(),
+                request_headers: config.headers.clone(),
+                crawl_delay: config.crawl_delay,
+                max_subresources: options.max_render_subresources,
+                max_resource_bytes: options.max_render_bytes,
+                wait_for: options.wait_for.clone(),
+                max_redirects: fetch::MAX_REDIRECTS,
+                ..basecrawl_render::RenderConfig::default()
+            },
+        )?;
+        redact_sensitive_request_echoes(&mut rendered.html, &config.headers);
+        rendered.html
     } else {
         body_str
     };

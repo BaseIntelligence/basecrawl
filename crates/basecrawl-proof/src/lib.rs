@@ -85,6 +85,16 @@ pub struct Response {
     /// Ordered redirect hops followed to reach the terminal response, in the order they were
     /// followed. Empty when the request was served without a redirect.
     pub redirect_chain: Vec<RedirectHop>,
+    /// Non-document browser requests accepted while producing the rendered DOM.
+    pub render_subresource_count: u64,
+    /// Configured ceiling for accepted browser subresources.
+    pub render_subresource_max_count: u64,
+    /// Sum of declared `Content-Length` values for accepted browser subresources.
+    pub render_resource_bytes: u64,
+    /// Configured aggregate browser subresource-byte ceiling.
+    pub render_max_bytes: u64,
+    /// True when a browser request or response was blocked by an aggregate resource cap.
+    pub render_resource_cap_exceeded: bool,
 }
 
 /// One hop in a followed HTTP redirect chain.
@@ -330,6 +340,8 @@ mod tests {
             "redirect_chain must serialize as an array"
         );
         assert_eq!(v["response"]["redirect_chain"].as_array().unwrap().len(), 0);
+        assert_eq!(v["response"]["render_subresource_count"], 0);
+        assert_eq!(v["response"]["render_resource_cap_exceeded"], false);
     }
 
     #[test]

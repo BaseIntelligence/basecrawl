@@ -8,13 +8,13 @@
 //! content on a JS-rendered page while `rawHtml` continues to reflect the source. A single render is
 //! shared by both `html` and `markdown`, so producing both never launches more than one browser.
 
-use std::time::Duration;
-
-use basecrawl_render::{render, Action, RenderConfig, RenderError};
+use basecrawl_render::{render, RenderConfig, RenderError};
 use url::Url;
 
 use crate::error::Error;
-use crate::fetch::MAX_REDIRECTS;
+
+/// Post-render DOM plus bounded browser-resource accounting.
+pub type RenderedPage = basecrawl_render::Rendered;
 
 /// Render `url` with headless Chromium and return its cleaned, post-render DOM serialization.
 ///
@@ -26,23 +26,9 @@ use crate::fetch::MAX_REDIRECTS;
 /// cap ([`MAX_REDIRECTS`]) and a loop is surfaced as [`Error::TooManyRedirects`]. The render is
 /// bounded by `timeout`; any other failure is surfaced as a structured [`Error`] so the scrape
 /// fails loudly rather than emitting misleading output.
-pub fn render_page(
-    url: &Url,
-    user_agent: &str,
-    timeout: Duration,
-    wait_for: Option<&str>,
-    actions: &[Action],
-) -> Result<String, Error> {
-    let config = RenderConfig {
-        timeout,
-        user_agent: user_agent.to_string(),
-        wait_for: wait_for.map(str::to_string),
-        actions: actions.to_vec(),
-        max_redirects: MAX_REDIRECTS,
-        ..RenderConfig::default()
-    };
+pub fn render_page(url: &Url, config: RenderConfig) -> Result<RenderedPage, Error> {
     match render(url, &config) {
-        Ok(rendered) => Ok(rendered.html),
+        Ok(rendered) => Ok(rendered),
         Err(RenderError::TooManyRedirects { max }) => Err(Error::TooManyRedirects {
             max,
             url: url.to_string(),

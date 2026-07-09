@@ -15,10 +15,11 @@ use rustls::client::{ClientConnection, Resumption, WebPkiServerVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::io::{self, Cursor, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 use url::Url;
 use x509_parser::prelude::parse_x509_certificate;
@@ -64,6 +65,11 @@ pub struct FetchConfig {
     pub insecure: bool,
     /// Maximum decoded response-body bytes retained in memory.
     pub max_body_bytes: usize,
+    /// Minimum interval between physical requests to the same scheme/host/port origin. The shared
+    /// limiter applies across redirects, robots, sitemaps, and pagination fetches that reuse this
+    /// config.
+    pub crawl_delay: Duration,
+    pub(crate) origin_limiter: Arc<OriginLimiter>,
 }
 
 impl Default for FetchConfig {
@@ -74,7 +80,60 @@ impl Default for FetchConfig {
             user_agent: DEFAULT_USER_AGENT.to_string(),
             insecure: false,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            crawl_delay: Duration::ZERO,
+            origin_limiter: Arc::new(OriginLimiter::default()),
         }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct OriginLimiter {
+    last_request_at: Mutex<HashMap<Origin, Instant>>,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct Origin {
+    scheme: String,
+    host: String,
+    port: u16,
+}
+
+impl OriginLimiter {
+    fn wait_for_turn(&self, url: &Url, delay: Duration) {
+        if delay.is_zero() {
+            return;
+        }
+        let Some(host) = url.host_str() else {
+            return;
+        };
+        let Some(port) = url.port_or_known_default() else {
+            return;
+        };
+        let origin = Origin {
+            scheme: url.scheme().to_ascii_lowercase(),
+            host: host.to_ascii_lowercase(),
+            port,
+        };
+        let mut requests = self
+            .last_request_at
+            .lock()
+            .expect("origin limiter mutex must not be poisoned");
+        if let Some(previous) = requests.get(&origin) {
+            let elapsed = previous.elapsed();
+            if elapsed < delay {
+                std::thread::sleep(delay - elapsed);
+            }
+        }
+        requests.insert(origin, Instant::now());
+    }
+}
+
+impl FetchConfig {
+    /// Apply this fetcher's shared per-origin limiter before a browser navigation reuses the same
+    /// origin. Keeping this method on the config lets the core maintain one schedule across its
+    /// direct Rust fetches and the subsequent Chromium render.
+    pub(crate) fn wait_for_origin(&self, url: &Url) {
+        self.origin_limiter.wait_for_turn(url, self.crawl_delay);
     }
 }
 
@@ -139,6 +198,10 @@ pub fn fetch(url: &Url, config: &FetchConfig) -> Result<Fetched, Error> {
     let mut egress_ip = None;
 
     loop {
+        // Record the request immediately before opening the connection. This is deliberately in
+        // the redirect loop, rather than around `fetch`, so every physical same-origin request is
+        // spaced, including redirect hops and callers such as robots/sitemap/pagination.
+        config.wait_for_origin(&current);
         let response = match current.scheme() {
             "http" => fetch_http(&current, config)?,
             "https" => fetch_https(&current, config)?,
