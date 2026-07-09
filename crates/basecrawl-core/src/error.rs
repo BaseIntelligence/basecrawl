@@ -39,6 +39,12 @@ pub enum Error {
     #[error("transport error: {0}")]
     Transport(String),
 
+    #[error("certificate validation failed: {0}")]
+    CertificateValidation(String),
+
+    #[error("TLS capture failed: {0}")]
+    TlsCapture(String),
+
     #[error("too many redirects: exceeded the maximum of {max} hop(s) while fetching '{url}'")]
     TooManyRedirects { max: usize, url: String },
 
@@ -69,6 +75,8 @@ impl Error {
             Error::InvalidActions(_) => "invalid_actions",
             Error::Timeout(_) => "timeout",
             Error::Transport(_) => "transport_error",
+            Error::CertificateValidation(_) => "certificate_validation",
+            Error::TlsCapture(_) => "tls_capture_error",
             Error::TooManyRedirects { .. } => "too_many_redirects",
             Error::Redirect(_) => "redirect_error",
             Error::Fetch(_) => "fetch_error",

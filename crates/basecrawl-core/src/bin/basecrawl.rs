@@ -42,6 +42,11 @@ struct Cli {
     #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS, value_name = "SECONDS")]
     timeout: u64,
 
+    /// Explicitly bypass TLS certificate validation. This is disabled by default and is intended
+    /// only for diagnostic capture of an invalid-certificate endpoint.
+    #[arg(long, default_value_t = false)]
+    insecure: bool,
+
     /// Disable JS rendering: produce html/markdown from the raw served source (no headless browser),
     /// so JS-injected content is not present.
     #[arg(long = "no-js", default_value_t = false)]
@@ -130,6 +135,7 @@ fn run(cli: Cli) -> Result<String, Error> {
         nonce: cli.nonce,
         timeout_secs: cli.timeout,
         headers,
+        insecure: cli.insecure,
         viewport,
         screenshot_full_page: cli.screenshot_full_page,
         render_enabled: !cli.no_js,

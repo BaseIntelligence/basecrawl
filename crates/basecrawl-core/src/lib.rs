@@ -19,7 +19,7 @@ pub mod screenshot;
 pub mod url_validation;
 
 use basecrawl_proof::{
-    Attestation, Egress, Request, Response, ResultBlock, SdkSignature, Tls, SCRAPE_PROOF_VERSION,
+    Attestation, Egress, Request, Response, ResultBlock, SdkSignature, SCRAPE_PROOF_VERSION,
 };
 use fetch::{FetchConfig, DEFAULT_TIMEOUT_SECS, DEFAULT_USER_AGENT};
 use serde_json::Value;
@@ -51,6 +51,9 @@ pub struct ScrapeOptions {
     pub timeout_secs: u64,
     /// Extra request headers to send, as parsed `(name, value)` pairs.
     pub headers: Vec<(String, String)>,
+    /// Bypass TLS certificate verification. Disabled by default and intended only for an explicit
+    /// diagnostic fetch of an invalid-certificate origin.
+    pub insecure: bool,
     /// Screenshot viewport as `(width, height)` in CSS pixels (device-scale-factor 1).
     pub viewport: (u32, u32),
     /// When true, `screenshot` captures the full scrollable page rather than just the viewport.
@@ -82,6 +85,7 @@ impl Default for ScrapeOptions {
             nonce: None,
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             headers: Vec::new(),
+            insecure: false,
             viewport: (
                 basecrawl_render::DEFAULT_VIEWPORT_WIDTH,
                 basecrawl_render::DEFAULT_VIEWPORT_HEIGHT,
@@ -108,6 +112,7 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
         timeout: Duration::from_secs(options.timeout_secs),
         headers: options.headers.clone(),
         user_agent: DEFAULT_USER_AGENT.to_string(),
+        insecure: options.insecure,
     };
     let fetched = fetch::fetch(&url, &config)?;
 
@@ -254,7 +259,7 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
             body_hash: None,
             formats: formats.iter().map(|f| f.as_str().to_string()).collect(),
         },
-        tls: Tls::default(),
+        tls: fetched.tls,
         response: Response {
             status_code: Some(fetched.status_code),
             headers_hash: Some(fetched.headers_hash),
