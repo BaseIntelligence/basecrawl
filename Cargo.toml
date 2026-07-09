@@ -34,6 +34,7 @@ png = "0.17"
 encoding_rs = "0.8"
 getrandom = "0.3"
 time = { version = "0.3", features = ["formatting", "parsing"] }
+quick-xml = "0.39"
 
 [profile.release]
 opt-level = 3

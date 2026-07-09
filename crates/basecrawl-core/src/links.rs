@@ -6,7 +6,8 @@
 //! Non-navigational schemes (`mailto:`/`tel:`/`javascript:` etc.) are categorized under `excluded`
 //! with their scheme rather than being resolved into bogus http URLs. `<link rel="canonical">` and
 //! `<link rel="alternate" hreflang>` are surfaced alongside the anchor list so downstream consumers
-//! (and the `relay` completeness verifier) can see them without a separate metadata pass.
+//! (and the `relay` completeness verifier) can see them without a separate metadata pass. The
+//! caller appends discovered sitemap URL seeds to the same `links` surface.
 
 use scraper::{Html, Selector};
 use serde::Serialize;
@@ -29,6 +30,8 @@ pub struct Links {
     /// Non-navigational anchor targets (e.g. mailto/tel/javascript), categorized by scheme and
     /// preserved verbatim rather than resolved into an http URL.
     pub excluded: Vec<ExcludedLink>,
+    /// Absolute URL seeds discovered from the origin's default or robots-referenced sitemap(s).
+    pub sitemap: Vec<String>,
 }
 
 /// A `rel="alternate" hreflang` locale alternate.
@@ -97,6 +100,7 @@ pub fn extract(html: &str, page_url: &Url) -> Links {
         canonical: extract_canonical(&document, &base),
         alternates: extract_alternates(&document, &base),
         excluded,
+        sitemap: Vec::new(),
     }
 }
 

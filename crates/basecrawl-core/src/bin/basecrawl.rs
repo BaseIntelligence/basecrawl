@@ -8,7 +8,7 @@ use base64::Engine;
 use basecrawl_core::error::Error;
 use basecrawl_core::fetch::{parse_header, DEFAULT_MAX_BODY_BYTES, DEFAULT_TIMEOUT_SECS};
 use basecrawl_core::{
-    format, scrape, screenshot, Action, Format, ScrapeOptions, DEFAULT_MAX_PAGES,
+    format, scrape, screenshot, Action, Format, RobotsPolicy, ScrapeOptions, DEFAULT_MAX_PAGES,
 };
 use clap::Parser;
 use serde_json::json;
@@ -80,6 +80,11 @@ struct Cli {
     /// Maximum number of pages to crawl (including the first) when --follow-pagination is set.
     #[arg(long = "max-pages", default_value_t = DEFAULT_MAX_PAGES, value_name = "N")]
     max_pages: usize,
+
+    /// robots.txt policy: enforce blocks denied paths, observe records without blocking, and ignore
+    /// skips policy consultation entirely.
+    #[arg(long, default_value_t = RobotsPolicy::Enforce, value_name = "POLICY")]
+    robots: RobotsPolicy,
 
     /// Screenshot viewport WIDTHxHEIGHT in CSS pixels (device-scale-factor 1).
     #[arg(long, default_value = "1280x800", value_name = "WxH")]
@@ -158,6 +163,7 @@ fn run(cli: Cli) -> Result<String, Error> {
         actions,
         follow_pagination: cli.follow_pagination,
         max_pages: cli.max_pages,
+        robots_policy: cli.robots,
     };
 
     let proof = scrape(&raw_url, &options)?;

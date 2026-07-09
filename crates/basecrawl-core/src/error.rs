@@ -33,6 +33,9 @@ pub enum Error {
     #[error("invalid actions specification: {0}")]
     InvalidActions(String),
 
+    #[error("robots policy denied the requested path")]
+    RobotsDenied(Value),
+
     #[error("request timed out: {0}")]
     Timeout(String),
 
@@ -76,6 +79,7 @@ impl Error {
             Error::InvalidHeader(_) => "invalid_header",
             Error::InvalidViewport(_) => "invalid_viewport",
             Error::InvalidActions(_) => "invalid_actions",
+            Error::RobotsDenied(_) => "robots_denied",
             Error::Timeout(_) => "timeout",
             Error::Transport(_) => "transport_error",
             Error::CertificateValidation(_) => "certificate_validation",
@@ -108,6 +112,9 @@ impl Error {
             }
             Error::TooManyRedirects { max, .. } => {
                 obj.insert("max_redirects".into(), Value::Number((*max).into()));
+            }
+            Error::RobotsDenied(robots) => {
+                obj.insert("robots".into(), robots.clone());
             }
             _ => {}
         }

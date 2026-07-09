@@ -113,6 +113,7 @@ fn egress_timestamp_tracks_the_network_fetch_not_later_render_steps() {
             }],
             timeout_secs: 10,
             render_timeout_secs: 10,
+            robots_policy: basecrawl_core::RobotsPolicy::Ignore,
             ..ScrapeOptions::default()
         },
     )
@@ -226,6 +227,8 @@ fn verbose_output_redacts_auth_headers_cookies_and_response_bodies() {
         "rawHtml",
         "--no-js",
         "--verbose",
+        "--robots",
+        "ignore",
         "--header",
         "Authorization: Bearer auth-header-secret-marker",
         "--header",

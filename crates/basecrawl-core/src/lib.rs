@@ -18,6 +18,7 @@ pub mod links;
 pub mod markdown;
 pub mod metadata;
 pub mod pagination;
+pub mod robots;
 pub mod screenshot;
 pub mod url_validation;
 
@@ -35,6 +36,7 @@ pub use basecrawl_proof::ScrapeProof;
 pub use basecrawl_render::{Action, ScrollDirection};
 pub use error::Error;
 pub use format::Format;
+pub use robots::RobotsPolicy;
 
 /// The default HTTP method for a scrape.
 pub const DEFAULT_METHOD: &str = "GET";
@@ -82,6 +84,9 @@ pub struct ScrapeOptions {
     pub follow_pagination: bool,
     /// The maximum number of pages crawled (including the first) when `follow_pagination` is set.
     pub max_pages: usize,
+    /// Handling for an origin's robots policy. The default is enforce: covered denied paths are
+    /// never fetched, while allowed/unmatched paths proceed with an observable metadata decision.
+    pub robots_policy: RobotsPolicy,
 }
 
 impl Default for ScrapeOptions {
@@ -105,6 +110,7 @@ impl Default for ScrapeOptions {
             actions: Vec::new(),
             follow_pagination: false,
             max_pages: DEFAULT_MAX_PAGES,
+            robots_policy: RobotsPolicy::Enforce,
         }
     }
 }
@@ -129,6 +135,10 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
         insecure: options.insecure,
         max_body_bytes: options.max_body_bytes,
     };
+    let robots_decision = robots::consult(&url, &config, options.robots_policy);
+    if robots_decision.denies_fetch() {
+        return Err(Error::RobotsDenied(robots_decision.to_value()));
+    }
     let fetched = fetch::fetch(&url, &config)?;
 
     // The request-side hashes cover exactly the emitted HTTP request inputs. The empty GET body
@@ -154,6 +164,11 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
     );
     redact_sensitive_request_echoes(&mut body_str, &config.headers);
     let page_base = Url::parse(&fetched.final_url).unwrap_or_else(|_| url.clone());
+    let sitemap_urls = if formats.contains(&Format::Links) {
+        robots::discover_sitemap_urls(&url, &config, &robots_decision.sitemap_urls)
+    } else {
+        Vec::new()
+    };
 
     // The post-render DOM feeds `html` and `markdown` so JS-injected content is captured. It is
     // rendered at most once (shared by both formats) and only when rendering is enabled, the served
@@ -201,16 +216,22 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
                     text_surface(&body_str, content_kind)
                 }
             }
-            Format::Links => links_surface(&body_str, &page_base, content_kind),
-            Format::Metadata => metadata::extract_for_content(
-                &body_str,
-                &metadata::PageMeta {
-                    source_url: url.as_str(),
-                    status_code: Some(fetched.status_code),
-                    content_type: fetched.content_type.as_deref(),
-                },
-                content_kind == ContentKind::Html,
-            ),
+            Format::Links => links_surface(&body_str, &page_base, content_kind, &sitemap_urls),
+            Format::Metadata => {
+                let mut value = metadata::extract_for_content(
+                    &body_str,
+                    &metadata::PageMeta {
+                        source_url: url.as_str(),
+                        status_code: Some(fetched.status_code),
+                        content_type: fetched.content_type.as_deref(),
+                    },
+                    content_kind == ContentKind::Html,
+                );
+                if let Value::Object(metadata) = &mut value {
+                    metadata.insert("robotsPolicy".to_string(), robots_decision.to_value());
+                }
+                value
+            }
             Format::Screenshot => {
                 let shot = screenshot::capture(
                     &url,
@@ -354,12 +375,22 @@ fn text_surface(body: &str, content_kind: ContentKind) -> Value {
     }
 }
 
-fn links_surface(body: &str, page_base: &Url, content_kind: ContentKind) -> Value {
+fn links_surface(
+    body: &str,
+    page_base: &Url,
+    content_kind: ContentKind,
+    sitemap_urls: &[String],
+) -> Value {
     if content_kind == ContentKind::Html {
-        serde_json::to_value(links::extract(body, page_base))
-            .expect("links surface is always serializable")
+        let mut links = links::extract(body, page_base);
+        links.sitemap = sitemap_urls.to_vec();
+        serde_json::to_value(links).expect("links surface is always serializable")
     } else {
-        serde_json::to_value(links::Links::default()).expect("links surface is always serializable")
+        let links = links::Links {
+            sitemap: sitemap_urls.to_vec(),
+            ..links::Links::default()
+        };
+        serde_json::to_value(links).expect("links surface is always serializable")
     }
 }
 
