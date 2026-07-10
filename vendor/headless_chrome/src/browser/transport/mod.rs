@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::sync::mpsc::Sender;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
@@ -16,6 +16,7 @@ use url::Url;
 use waiting_call_registry::WaitingCallRegistry;
 use web_socket_connection::WebSocketConnection;
 
+use crate::browser::{BrowserOperationTimeout, BrowserSetupTimeout};
 use crate::protocol::cdp::{Target, types::Event, types::Method};
 
 use crate::types::{CallId, Message, parse_raw_message, parse_response};
@@ -63,6 +64,8 @@ pub struct Transport {
     call_id_counter: Arc<AtomicU32>,
     loop_shutdown_tx: Mutex<mpsc::SyncSender<()>>,
     idle_browser_timeout: Duration,
+    deadline: Option<Instant>,
+    setup_phase: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Error)]
@@ -76,12 +79,48 @@ impl Transport {
         idle_browser_timeout: Duration,
         root_cert: Option<Vec<u8>>,
     ) -> Result<Self> {
+        Self::new_inner(
+            ws_url,
+            process_id,
+            idle_browser_timeout,
+            root_cert,
+            None,
+        )
+    }
+
+    /// Create a transport whose connection and every CDP request wait only until `deadline`.
+    pub fn new_with_deadline(
+        ws_url: Url,
+        process_id: Option<u32>,
+        idle_browser_timeout: Duration,
+        root_cert: Option<Vec<u8>>,
+        deadline: Instant,
+    ) -> Result<Self> {
+        Self::new_inner(
+            ws_url,
+            process_id,
+            idle_browser_timeout,
+            root_cert,
+            Some(deadline),
+        )
+    }
+
+    fn new_inner(
+        ws_url: Url,
+        process_id: Option<u32>,
+        idle_browser_timeout: Duration,
+        root_cert: Option<Vec<u8>>,
+        deadline: Option<Instant>,
+    ) -> Result<Self> {
+        let setup_phase = Arc::new(AtomicBool::new(true));
         let (messages_tx, messages_rx) = mpsc::channel();
         let web_socket_connection = Arc::new(WebSocketConnection::new(
             &ws_url,
             process_id,
             messages_tx,
             root_cert,
+            deadline,
+            Arc::clone(&setup_phase),
         )?);
 
         let waiting_call_registry = Arc::new(WaitingCallRegistry::new());
@@ -113,6 +152,8 @@ impl Transport {
             call_id_counter: Arc::new(AtomicU32::new(0)),
             loop_shutdown_tx: guarded_shutdown_tx,
             idle_browser_timeout,
+            deadline,
+            setup_phase,
         })
     }
 
@@ -176,10 +217,22 @@ impl Transport {
             params_string.chars().take(400).collect::<String>()
         );
 
-        let response_result = util::Wait::new(self.idle_browser_timeout, Duration::from_millis(5))
-            .until(|| response_rx.try_recv().ok());
+        let response_result = util::Wait::new(
+            self.current_timeout()?,
+            Duration::from_millis(5),
+        )
+        .until(|| response_rx.try_recv().ok())
+        .map_err(|error| {
+            if self.deadline.is_some() {
+                self.deadline_error()
+            } else {
+                error.into()
+            }
+        })?;
         trace!("received response for: {} {:?}", &call_id, params_string);
-        parse_response::<C::ReturnObject>((response_result?)?)
+        let parsed = parse_response::<C::ReturnObject>(response_result?)?;
+        self.current_timeout()?;
+        Ok(parsed)
     }
 
     pub fn call_method_on_target<C>(
@@ -223,6 +276,31 @@ impl Transport {
         self.web_socket_connection.shutdown();
         let shutdown_tx = self.loop_shutdown_tx.lock().unwrap();
         let _ = shutdown_tx.send(());
+    }
+
+    /// Mark Chrome process, transport, target, tab, and initial CDP setup as complete.
+    pub fn complete_setup(&self) {
+        self.setup_phase.store(false, Ordering::SeqCst);
+    }
+
+    fn current_timeout(&self) -> Result<Duration> {
+        self.deadline
+            .map(|deadline| {
+                deadline
+                    .checked_duration_since(Instant::now())
+                    .filter(|duration| !duration.is_zero())
+                    .ok_or_else(|| self.deadline_error())
+            })
+            .transpose()
+            .map(|timeout| timeout.unwrap_or(self.idle_browser_timeout))
+    }
+
+    fn deadline_error(&self) -> anyhow::Error {
+        if self.setup_phase.load(Ordering::SeqCst) {
+            BrowserSetupTimeout.into()
+        } else {
+            BrowserOperationTimeout.into()
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -296,8 +374,12 @@ impl Transport {
                                                 .unwrap()
                                                 .get(&ListenerId::SessionId(session_id))
                                             {
-                                                tx.send(target_event)
-                                                    .expect("Couldn't send event to listener");
+                                                if tx.send(target_event).is_err() {
+                                                    warn!(
+                                                        "Couldn't send target event to listener because it was closed"
+                                                    );
+                                                    break;
+                                                }
                                             }
                                         }
 

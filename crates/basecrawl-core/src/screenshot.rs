@@ -25,6 +25,9 @@ pub fn capture_until(
     deadline: Instant,
 ) -> Result<Screenshot, Error> {
     screenshot_until(url, &config, deadline).map_err(|error| match error {
+        error if error.is_deadline_exhausted() => Error::Timeout(
+            "scrape deadline exceeded during browser setup or screenshot".to_string(),
+        ),
         RenderError::ResourceBudgetExceeded => Error::ResourceBudgetExceeded,
         RenderError::DocumentPolicyDenied(detail) => Error::from_document_policy_denial(detail),
         error => Error::Render(error.to_string()),

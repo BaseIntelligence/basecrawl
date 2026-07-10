@@ -1,6 +1,8 @@
-use std::net::TcpStream;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::net::{TcpStream, ToSocketAddrs};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use log::{debug, info, trace, warn};
@@ -9,11 +11,12 @@ use tungstenite::protocol::WebSocketConfig;
 use tungstenite::stream::MaybeTlsStream;
 use url::Url;
 
+use crate::browser::{BrowserOperationTimeout, BrowserSetupTimeout};
 use crate::types::{Message, parse_raw_message};
 
 type TungsteniteWebsocketConnection = tungstenite::protocol::WebSocket<MaybeTlsStream<TcpStream>>;
 
-const READ_TIMEOUT_DURATION: std::time::Duration = std::time::Duration::from_millis(100);
+const READ_TIMEOUT_DURATION: Duration = Duration::from_millis(100);
 
 #[cfg(feature = "rustls-tls-webpki-roots")]
 static RUSTLS_INIT: std::sync::Once = std::sync::Once::new();
@@ -73,10 +76,76 @@ fn set_read_timeout(stream: &mut MaybeTlsStream<TcpStream>) -> Result<()> {
     Ok(())
 }
 
+fn set_write_timeout(stream: &mut MaybeTlsStream<TcpStream>, timeout: Duration) -> Result<()> {
+    let tcp_stream = match stream {
+        MaybeTlsStream::Plain(s) => s,
+
+        #[cfg(any(
+            feature = "rustls-tls-native-roots",
+            feature = "rustls-tls-webpki-roots"
+        ))]
+        MaybeTlsStream::Rustls(s) => &mut s.sock,
+
+        #[cfg(feature = "native-tls")]
+        MaybeTlsStream::NativeTls(s) => s.get_mut(),
+
+        #[allow(unreachable_patterns)]
+        _ => {
+            return Err(anyhow::anyhow!("unsupported websocket stream type"));
+        }
+    };
+
+    tcp_stream.set_write_timeout(Some(timeout))?;
+    Ok(())
+}
+
+fn remaining_until(deadline: Instant, setup_phase: &AtomicBool) -> Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .ok_or_else(|| {
+            if setup_phase.load(Ordering::SeqCst) {
+                BrowserSetupTimeout.into()
+            } else {
+                BrowserOperationTimeout.into()
+            }
+        })
+}
+
+fn connect_tcp(
+    ws_url: &Url,
+    deadline: Option<Instant>,
+    setup_phase: &AtomicBool,
+) -> Result<TcpStream> {
+    let host = ws_url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("missing websocket host: {ws_url}"))?;
+    let port = ws_url
+        .port_or_known_default()
+        .ok_or_else(|| anyhow::anyhow!("missing websocket port: {ws_url}"))?;
+    let addresses = (host, port).to_socket_addrs()?;
+    let mut last_error = None;
+    for address in addresses {
+        let timeout = deadline
+            .map(|deadline| remaining_until(deadline, setup_phase))
+            .transpose()?
+            .unwrap_or(Duration::from_secs(30));
+        match TcpStream::connect_timeout(&address, timeout) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error
+        .map(anyhow::Error::from)
+        .unwrap_or_else(|| anyhow::anyhow!("no addresses found for websocket host {host}")))
+}
+
 pub struct WebSocketConnection {
     connection: Arc<Mutex<TungsteniteWebsocketConnection>>,
     thread: std::thread::JoinHandle<()>,
     process_id: Option<u32>,
+    deadline: Option<Instant>,
+    setup_phase: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for WebSocketConnection {
@@ -91,9 +160,16 @@ impl WebSocketConnection {
         process_id: Option<u32>,
         messages_tx: mpsc::Sender<Message>,
         root_cert: Option<Vec<u8>>,
+        deadline: Option<Instant>,
+        setup_phase: Arc<AtomicBool>,
     ) -> Result<Self> {
         let (connection, _) =
-            Self::websocket_connection_with_root_cert(ws_url, root_cert.as_deref())?;
+            Self::websocket_connection_with_root_cert(
+                ws_url,
+                root_cert.as_deref(),
+                deadline,
+                &setup_phase,
+            )?;
 
         let connection = Arc::new(Mutex::new(connection));
 
@@ -111,6 +187,8 @@ impl WebSocketConnection {
             connection,
             thread,
             process_id,
+            deadline,
+            setup_phase,
         })
     }
 
@@ -216,6 +294,8 @@ impl WebSocketConnection {
     pub fn websocket_connection_with_root_cert(
         ws_url: &Url,
         root_cert: Option<&[u8]>,
+        deadline: Option<Instant>,
+        setup_phase: &AtomicBool,
     ) -> Result<(
         tungstenite::WebSocket<MaybeTlsStream<TcpStream>>,
         Response<Option<Vec<u8>>>,
@@ -228,10 +308,21 @@ impl WebSocketConnection {
         );
 
         if root_cert.is_none() {
-            let mut client =
-                tungstenite::client::connect_with_config(ws_url.as_str(), config, u8::MAX - 1)?;
+            let tcp = connect_tcp(ws_url, deadline, setup_phase)?;
+            let handshake_timeout = deadline
+                .map(|deadline| remaining_until(deadline, setup_phase))
+                .transpose()?
+                .unwrap_or(Duration::from_secs(30));
+            tcp.set_read_timeout(Some(handshake_timeout))?;
+            tcp.set_write_timeout(Some(handshake_timeout))?;
+            let mut client = tungstenite::client::client_with_config(
+                ws_url.as_str(),
+                MaybeTlsStream::Plain(tcp),
+                config,
+            )?;
 
             set_read_timeout(client.0.get_mut())?;
+            set_write_timeout(client.0.get_mut(), handshake_timeout)?;
 
             debug!("Successfully connected to WebSocket: {ws_url}");
 
@@ -244,15 +335,13 @@ impl WebSocketConnection {
 
             init_rustls_provider();
 
-            let host = ws_url
-                .host_str()
-                .ok_or_else(|| anyhow::anyhow!("missing websocket host: {ws_url}"))?;
-
-            let port = ws_url
-                .port_or_known_default()
-                .ok_or_else(|| anyhow::anyhow!("missing websocket port: {ws_url}"))?;
-
-            let tcp = TcpStream::connect((host, port))?;
+            let tcp = connect_tcp(ws_url, deadline, setup_phase)?;
+            let handshake_timeout = deadline
+                .map(|deadline| remaining_until(deadline, setup_phase))
+                .transpose()?
+                .unwrap_or(Duration::from_secs(30));
+            tcp.set_read_timeout(Some(handshake_timeout))?;
+            tcp.set_write_timeout(Some(handshake_timeout))?;
 
             let mut roots = rustls::RootCertStore::empty();
             roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -270,6 +359,7 @@ impl WebSocketConnection {
                 tungstenite::client_tls_with_config(request, tcp, config, Some(connector))?;
 
             set_read_timeout(client.0.get_mut())?;
+            set_write_timeout(client.0.get_mut(), handshake_timeout)?;
 
             debug!("Successfully connected to WebSocket with custom root cert: {ws_url}");
 
@@ -291,6 +381,13 @@ impl WebSocketConnection {
             .connection
             .lock()
             .map_err(|err| anyhow::anyhow!("WS mutex poisoned: {err}"))?;
+
+        if let Some(deadline) = self.deadline {
+            set_write_timeout(
+                sender.get_mut(),
+                remaining_until(deadline, &self.setup_phase)?,
+            )?;
+        }
 
         sender.send(message)?;
         self.thread.thread().unpark();

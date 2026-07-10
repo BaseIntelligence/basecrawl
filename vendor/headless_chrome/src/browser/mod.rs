@@ -2,10 +2,11 @@ use std::sync::Mutex;
 use std::sync::mpsc;
 use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use log::{debug, error, info, trace};
+use thiserror::Error;
 
 use process::Process;
 pub use process::{DEFAULT_ARGS, LaunchOptions, LaunchOptionsBuilder};
@@ -37,6 +38,22 @@ mod fetcher;
 mod process;
 pub mod tab;
 pub mod transport;
+
+/// The caller-owned deadline for launching and preparing a browser elapsed.
+///
+/// This is distinct from an idle CDP timeout so consumers can surface an exhausted scrape deadline
+/// as a structured timeout rather than as a generic launch failure.
+#[derive(Debug, Error)]
+#[error("browser setup deadline exceeded")]
+pub struct BrowserSetupTimeout;
+
+/// A caller-owned deadline elapsed after browser setup completed.
+///
+/// The render layer preserves this as a render failure while still ensuring every later CDP call
+/// consumes only the remaining scrape duration.
+#[derive(Debug, Error)]
+#[error("browser operation deadline exceeded")]
+pub struct BrowserOperationTimeout;
 
 /// A handle to an instance of Chrome / Chromium, which wraps a WebSocket connection to its debugging port.
 ///
@@ -79,6 +96,7 @@ pub mod transport;
 pub struct Browser {
     inner: Arc<BrowserInner>,
     default_timeout: Arc<RwLock<Duration>>,
+    setup_deadline: Option<Instant>,
 }
 
 pub struct BrowserInner {
@@ -106,7 +124,32 @@ impl Browser {
             None,
         )?);
 
-        Self::create_browser(Some(process), transport, idle_browser_timeout, true)
+        Self::create_browser(Some(process), transport, idle_browser_timeout, true, None)
+    }
+
+    /// Launch Chrome and complete browser/tab setup within `deadline`.
+    ///
+    /// Process startup, transport connection, target discovery, target registration, and tab
+    /// initialization each consume this one caller-owned absolute deadline.
+    pub fn new_with_deadline(launch_options: LaunchOptions, deadline: Instant) -> Result<Self> {
+        let idle_browser_timeout = remaining_until(deadline)?;
+        let process = Process::new_with_deadline(launch_options, deadline)?;
+        let process_id = process.get_id();
+        let transport = Arc::new(Transport::new_with_deadline(
+            process.debug_ws_url.clone(),
+            Some(process_id),
+            idle_browser_timeout,
+            None,
+            deadline,
+        )?);
+
+        Self::create_browser(
+            Some(process),
+            transport,
+            idle_browser_timeout,
+            true,
+            Some(deadline),
+        )
     }
 
     /// Calls [`Browser::new`] with options to launch a headless browser using whatever Chrome / Chromium
@@ -133,7 +176,7 @@ impl Browser {
             Some(root_cert),
         )?);
         trace!("created transport");
-        Self::create_browser(None, transport, Duration::from_secs(20), false)
+        Self::create_browser(None, transport, Duration::from_secs(20), false, None)
     }
 
     /// Allows you to drive an externally-launched Chrome process instead of launch one via [`Browser::new`].
@@ -147,7 +190,7 @@ impl Browser {
         let transport = Arc::new(Transport::new(url, None, idle_browser_timeout, None)?);
         trace!("created transport");
 
-        Self::create_browser(None, transport, idle_browser_timeout, false)
+        Self::create_browser(None, transport, idle_browser_timeout, false, None)
     }
 
     fn create_browser(
@@ -155,6 +198,7 @@ impl Browser {
         transport: Arc<Transport>,
         idle_browser_timeout: Duration,
         close_on_drop: bool,
+        setup_deadline: Option<Instant>,
     ) -> Result<Self> {
         let tabs = Arc::new(Mutex::new(Vec::with_capacity(1)));
 
@@ -169,6 +213,7 @@ impl Browser {
                 close_on_drop,
             }),
             default_timeout: Arc::new(RwLock::new(Duration::from_secs(20))),
+            setup_deadline,
         };
 
         let incoming_events_rx = browser.inner.transport.listen_to_browser_events();
@@ -178,6 +223,7 @@ impl Browser {
             browser.get_process_id(),
             shutdown_rx,
             idle_browser_timeout,
+            browser.setup_deadline,
         );
         trace!("created browser event listener");
 
@@ -200,6 +246,12 @@ impl Browser {
             None => "browser is not running".to_string(),
             Some(process) => process.debug_ws_url.clone().to_string(),
         }
+    }
+
+    /// Mark initial browser setup complete so later deadline exhaustion remains distinguishable from
+    /// process/transport/target/tab setup exhaustion.
+    pub fn complete_setup(&self) {
+        self.inner.transport.complete_setup();
     }
 
     /// The tabs are behind an `Arc` and `Mutex` because they're accessible from multiple threads
@@ -237,7 +289,7 @@ impl Browser {
     /// Wait timeout: 10 secs
     #[deprecated(since = "1.0.4", note = "Use new_tab() instead.")]
     pub fn wait_for_initial_tab(&self) -> Result<Arc<Tab>> {
-        match util::Wait::with_timeout(*self.default_timeout.read().unwrap())
+        match util::Wait::with_timeout(self.current_timeout()?)
             .until(|| self.inner.tabs.lock().unwrap().first().cloned())
         {
             Ok(tab) => Ok(tab),
@@ -302,7 +354,7 @@ impl Browser {
     pub fn new_tab_with_options(&self, create_target_params: CreateTarget) -> Result<Arc<Tab>> {
         let target_id = self.call_method(create_target_params)?.target_id;
 
-        util::Wait::with_timeout(*self.default_timeout.read().unwrap())
+        let tab = util::Wait::with_timeout(self.current_timeout()?)
             .until(|| {
                 let tabs = self.inner.tabs.lock().unwrap();
                 tabs.iter().find_map(|tab| {
@@ -313,7 +365,17 @@ impl Browser {
                     }
                 })
             })
-            .map_err(Into::into)
+            .map_err(|error| {
+                if self.setup_deadline.is_some() {
+                    anyhow::Error::from(BrowserSetupTimeout)
+                } else {
+                    error.into()
+                }
+            })?;
+        if let Some(deadline) = self.setup_deadline {
+            remaining_until(deadline)?;
+        }
+        Ok(tab)
     }
 
     /// Creates the equivalent of a new incognito window, AKA a browser context
@@ -348,7 +410,11 @@ impl Browser {
                 continue;
             }
 
-            let tab = Tab::new(target, self.inner.transport.clone());
+            let tab = Tab::new_with_deadline(
+                target,
+                self.inner.transport.clone(),
+                self.setup_deadline,
+            );
             if let Ok(tab) = tab {
                 if let Some(index) = tabs_lock
                     .iter()
@@ -388,6 +454,7 @@ impl Browser {
         process_id: Option<u32>,
         shutdown_rx: mpsc::Receiver<()>,
         idle_browser_timeout: Duration,
+        setup_deadline: Option<Instant>,
     ) {
         let tabs = Arc::clone(&self.inner.tabs);
         let transport = Arc::clone(&self.inner.transport);
@@ -428,7 +495,11 @@ impl Browser {
                                 // meaning the devtools has ben opened automatically..
                                 // for now ignoring devtools tabs to be in tabs..
                                 if target_info.Type == "page" {
-                                    match Tab::new(target_info, Arc::clone(&transport)) {
+                                    match Tab::new_with_deadline(
+                                        target_info,
+                                        Arc::clone(&transport),
+                                        setup_deadline,
+                                    ) {
                                         Ok(new_tab) => {
                                             tabs.lock().unwrap().push(Arc::new(new_tab));
                                         }
@@ -502,12 +573,27 @@ impl Browser {
         self.inner.transport.call_method_on_browser(method)
     }
 
+    fn current_timeout(&self) -> Result<Duration> {
+        Ok(self
+            .setup_deadline
+            .map(remaining_until)
+            .transpose()?
+            .unwrap_or_else(|| *self.default_timeout.read().unwrap()))
+    }
+
     #[allow(dead_code)]
     #[cfg(test)]
     pub(crate) fn process(&self) -> Option<&Process> {
         #[allow(clippy::used_underscore_binding)]
         self.inner.process.as_ref()
     }
+}
+
+pub(crate) fn remaining_until(deadline: Instant) -> Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .ok_or_else(|| BrowserSetupTimeout.into())
 }
 
 /// [`Browser`] is being dropped!

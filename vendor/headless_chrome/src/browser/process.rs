@@ -29,6 +29,7 @@ use crate::util;
 #[cfg(feature = "fetch")]
 use super::fetcher::{Fetcher, FetcherOptions};
 use std::collections::HashMap;
+use super::BrowserSetupTimeout;
 
 #[cfg(test)]
 struct ForTesting;
@@ -276,7 +277,16 @@ pub static DEFAULT_ARGS: [&str; 23] = [
 ];
 
 impl Process {
-    pub fn new(mut launch_options: LaunchOptions) -> Result<Self> {
+    pub fn new(launch_options: LaunchOptions) -> Result<Self> {
+        let deadline = Instant::now() + launch_options.idle_browser_timeout;
+        Self::new_with_deadline(launch_options, deadline)
+    }
+
+    /// Launch Chrome while consuming a caller-owned absolute setup deadline.
+    pub fn new_with_deadline(
+        mut launch_options: LaunchOptions,
+        deadline: Instant,
+    ) -> Result<Self> {
         if launch_options.path.is_none() {
             #[cfg(feature = "fetch")]
             {
@@ -289,7 +299,6 @@ impl Process {
             }
         }
 
-        let deadline = Instant::now() + launch_options.idle_browser_timeout;
         let mut process = Self::start_process(&launch_options)?;
 
         info!("Started Chrome. PID: {}", process.0.id());
@@ -304,7 +313,7 @@ impl Process {
             let remaining = deadline
                 .checked_duration_since(Instant::now())
                 .filter(|duration| !duration.is_zero())
-                .ok_or(ChromeLaunchError::PortOpenTimeout {})?;
+                .ok_or(BrowserSetupTimeout)?;
             match Self::ws_url_from_output(process.0.borrow_mut(), remaining) {
                 Ok(debug_ws_url) => {
                     url = debug_ws_url;

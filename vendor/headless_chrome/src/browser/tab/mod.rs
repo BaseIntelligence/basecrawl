@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{
     collections::HashMap,
     sync::atomic::{AtomicBool, Ordering},
@@ -52,6 +52,7 @@ use Network::{
 };
 
 use crate::util;
+use crate::browser::remaining_until;
 
 use crate::types::{Bounds, CurrentBounds, PrintToPdfOptions, RemoteError};
 
@@ -213,6 +214,15 @@ impl NoElementFound {
 
 impl Tab {
     pub fn new(target_info: TargetInfo, transport: Arc<Transport>) -> Result<Self> {
+        Self::new_with_deadline(target_info, transport, None)
+    }
+
+    /// Create and attach a tab while its transport remains bounded by `deadline`.
+    pub(crate) fn new_with_deadline(
+        target_info: TargetInfo,
+        transport: Arc<Transport>,
+        deadline: Option<Instant>,
+    ) -> Result<Self> {
         let target_id = target_info.target_id.clone();
 
         let session_id = transport
@@ -226,6 +236,11 @@ impl Tab {
         debug!("New tab attached with session ID: {session_id:?}");
 
         let target_info_mutex = Arc::new(Mutex::new(target_info));
+
+        let default_timeout = deadline
+            .map(remaining_until)
+            .transpose()?
+            .unwrap_or(Duration::from_secs(20));
 
         let tab = Self {
             target_id,
@@ -244,7 +259,7 @@ impl Tab {
                 username: None,
                 password: None,
             })),
-            default_timeout: Arc::new(RwLock::new(Duration::from_secs(20))),
+            default_timeout: Arc::new(RwLock::new(default_timeout)),
             event_listeners: Arc::new(Mutex::new(Vec::new())),
             slow_motion_multiplier: Arc::new(RwLock::new(0.0)),
         };

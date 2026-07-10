@@ -40,6 +40,9 @@ pub fn render_page_until(
 ) -> Result<RenderedPage, Error> {
     match render_until(url, &config, deadline) {
         Ok(rendered) => Ok(rendered),
+        Err(error) if error.is_deadline_exhausted() => Err(Error::Timeout(
+            "scrape deadline exceeded during browser setup or render".to_string(),
+        )),
         Err(RenderError::TooManyRedirects { max }) => Err(Error::TooManyRedirects {
             max,
             url: url.to_string(),

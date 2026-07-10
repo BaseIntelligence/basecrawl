@@ -92,6 +92,16 @@ pub enum RenderError {
     NoContent,
 }
 
+impl RenderError {
+    /// Whether this failure arose because the caller-owned absolute deadline was exhausted.
+    ///
+    /// The vendored CDP driver surfaces setup deadline expiry as an `anyhow` error, so preserve
+    /// that structured condition through driver error wrappers.
+    pub fn is_deadline_exhausted(&self) -> bool {
+        self.to_string().contains("browser setup deadline exceeded")
+    }
+}
+
 /// Direction of a scripted [`Action::Scroll`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -661,7 +671,8 @@ fn launch_browser(
         .build()
         .map_err(|error| RenderError::Launch(error.to_string()))?;
 
-    Browser::new(options).map_err(|error| RenderError::Launch(error.to_string()))
+    Browser::new_with_deadline(options, deadline)
+        .map_err(|error| RenderError::Launch(error.to_string()))
 }
 
 /// In-page finalize script: inline embedded content, clean, and serialize (a single CDP round-trip).
@@ -883,6 +894,7 @@ pub fn render_until(
     })
     .map_err(|e| RenderError::Render(e.to_string()))?;
 
+    browser.complete_setup();
     set_tab_deadline(&tab, deadline, config.timeout)?;
     tab.navigate_to(url.as_str()).map_err(|error| {
         render_failure_with_policy(error.to_string(), &resource_budget, &document_policy_denial)
@@ -1389,6 +1401,7 @@ pub fn screenshot_until(
     })
     .map_err(|e| RenderError::Render(e.to_string()))?;
 
+    browser.complete_setup();
     set_tab_deadline(&tab, deadline, config.timeout)?;
     tab.navigate_to(url.as_str()).map_err(|error| {
         render_failure_with_policy(error.to_string(), &resource_budget, &document_policy_denial)
