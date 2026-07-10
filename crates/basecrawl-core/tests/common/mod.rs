@@ -1,12 +1,10 @@
 //! Shared test support for the `basecrawl-core` integration tests.
 //!
 //! The validation contract names `httpbin.org` as the HTTP-semantics target, but that host is
-//! frequently overloaded: it can answer `/get` while timing out other endpoints in the same run,
-//! so it cannot be relied on for a deterministic suite. [`httpbin_base`] therefore returns the
-//! first reachable base URL from a list of behavior-identical httpbin instances, ordered by
-//! observed reliability. The reference-`httpbin` deployment at `nghttp2.org/httpbin` runs the same
-//! software and the same endpoints as `httpbin.org` (redirects, gzip/deflate/brotli, headers, ...),
-//! so the HTTP semantics under test are identical regardless of which base is selected.
+//! TLS 1.2-only in this validation environment and cannot produce normal authenticity evidence.
+//! [`httpbin_base`] therefore uses the capability-verified TLS 1.3 reference-httpbin deployment
+//! at `nghttp2.org/httpbin`, which runs the same endpoints (redirects, gzip/deflate/brotli,
+//! headers, ...) as `httpbin.org`.
 #![allow(dead_code)]
 
 use base64::Engine;
@@ -20,17 +18,16 @@ use std::thread;
 use std::time::Duration;
 use x509_parser::prelude::parse_x509_certificate;
 
-/// httpbin-compatible bases in preference order (no trailing slash), ordered by observed
-/// reliability. All run the httpbin API; `nghttp2.org/httpbin` and `httpbin.org` are the reference
-/// Python httpbin (full endpoint set incl. brotli); `httpbingo.org` is a Go re-implementation kept
-/// as a last-resort fallback.
-pub const HTTPBIN_CANDIDATES: &[&str] = &[
-    "https://nghttp2.org/httpbin",
-    "https://httpbin.org",
-    "https://httpbingo.org",
-];
+/// Capability-verified TLS 1.3 reference-httpbin mirror (no trailing slash).
+///
+/// `httpbin.org` is TLS 1.2-only in this validation environment, so it cannot produce the
+/// CertificateVerify transcript evidence a normal ScrapeProof requires. `nghttp2.org/httpbin`
+/// runs the reference Python httpbin API and is independently known to negotiate TLS 1.3.
+pub const HTTPBIN_TLS13_MIRROR: &str = "https://nghttp2.org/httpbin";
+pub const HTTPBIN_CANDIDATES: &[&str] = &[HTTPBIN_TLS13_MIRROR];
 
-/// Return a live httpbin-compatible base URL, memoized for the lifetime of the test binary.
+/// Return the capability-verified TLS 1.3 httpbin-compatible base URL, memoized for the lifetime
+/// of the test binary.
 ///
 /// Panics only if none of the candidates are reachable, which indicates a genuine loss of network
 /// egress rather than a single-host outage.
@@ -42,15 +39,18 @@ pub fn httpbin_base() -> &'static str {
                 return *base;
             }
         }
-        panic!("no httpbin-compatible host reachable (tried {HTTPBIN_CANDIDATES:?})");
+        panic!("no TLS 1.3 httpbin-compatible host reachable (tried {HTTPBIN_CANDIDATES:?})");
     })
 }
 
-/// Probe `{base}/get` with curl and report whether it answered `200`.
+/// Probe `{base}/get` with curl, requiring HTTP 200 plus an independent TLS 1.3 OpenSSL
+/// handshake. Curl builds on validation runners do not consistently expose `%{ssl_version}`, so
+/// OpenSSL is the portable capability check.
 fn probe_ok(base: &str) -> bool {
-    Command::new("curl")
+    let http_ok = Command::new("curl")
         .args([
             "-s",
+            "-S",
             "-m",
             "8",
             "-o",
@@ -62,8 +62,30 @@ fn probe_ok(base: &str) -> bool {
         .output()
         .ok()
         .and_then(|out| String::from_utf8(out.stdout).ok())
-        .map(|code| code.trim() == "200")
-        .unwrap_or(false)
+        .is_some_and(|status| status.trim() == "200");
+    if !http_ok {
+        return false;
+    }
+
+    let Ok(url) = url::Url::parse(base) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    Command::new("openssl")
+        .args([
+            "s_client",
+            "-connect",
+            &format!("{host}:443"),
+            "-servername",
+            host,
+            "-tls1_3",
+            "-brief",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|output| output.status.success())
 }
 
 /// Maximum attempts made by an explicitly best-effort open-web smoke check.
@@ -356,9 +378,15 @@ fn validate_scrapeproof_schema(proof: &Value) -> Result<(), String> {
 
 fn validate_open_web_tls(proof: &ScrapeProof, expected_host: &str) -> Result<(), String> {
     let tls = &proof.tls;
-    if !matches!(tls.negotiated_version.as_deref(), Some("1.2") | Some("1.3")) {
+    if tls.certificate_validation != basecrawl_proof::CertificateValidation::Validated {
         return Err(format!(
-            "negotiated_version must be captured as TLS 1.2 or 1.3, got {:?}",
+            "certificate_validation must be validated, got {:?}",
+            tls.certificate_validation
+        ));
+    }
+    if tls.negotiated_version.as_deref() != Some("1.3") {
+        return Err(format!(
+            "negotiated_version must be TLS 1.3, got {:?}",
             tls.negotiated_version
         ));
     }
@@ -380,6 +408,17 @@ fn validate_open_web_tls(proof: &ScrapeProof, expected_host: &str) -> Result<(),
         if !remainder.is_empty() {
             return Err(format!("certificate #{index} has trailing non-DER bytes"));
         }
+    }
+    let server_ephemeral_pubkey = tls
+        .server_ephemeral_pubkey
+        .as_deref()
+        .ok_or_else(|| "server_ephemeral_pubkey is missing".to_string())?;
+    if base64::prelude::BASE64_STANDARD
+        .decode(server_ephemeral_pubkey)
+        .map_err(|error| format!("server_ephemeral_pubkey is not valid base64: {error}"))?
+        .is_empty()
+    {
+        return Err("server_ephemeral_pubkey is empty".to_string());
     }
     let transcript = tls
         .handshake_transcript_hash

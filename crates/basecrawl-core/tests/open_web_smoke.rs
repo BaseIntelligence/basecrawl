@@ -186,33 +186,20 @@ fn books_open_web_smoke_is_strict_and_bounded() {
 
 #[test]
 fn httpbin_open_web_smoke_is_strict_and_bounded() {
-    for base in common::HTTPBIN_CANDIDATES {
-        let host = url::Url::parse(base)
-            .expect("httpbin candidate must be a URL")
-            .host_str()
-            .expect("httpbin candidate must have a host")
-            .to_string();
-        let url = format!("{base}/get");
-        match common::retry_open_web(|| common::classify_open_web_output(&run(&url), &host)) {
-            common::RemoteSmokeOutcome::Success(proof) => {
-                let proof = serde_json::to_value(proof).expect("ScrapeProof must serialize");
-                assert_open_web_response("httpbin", &proof);
-                return;
-            }
-            common::RemoteSmokeOutcome::Skipped(transient) => {
-                eprintln!(
-                    "httpbin-compatible origin {base} skipped after {} bounded transient-origin \
-                     failure attempt(s): {transient}; trying the next candidate",
-                    common::REMOTE_SMOKE_MAX_ATTEMPTS
-                );
-            }
-            common::RemoteSmokeOutcome::Fatal(failure) => {
-                panic!("httpbin-compatible origin {base} failed without a skip: {failure}");
-            }
-        }
-    }
-    panic!(
-        "no httpbin-compatible origin was available after bounded transient retries: {:?}",
-        common::HTTPBIN_CANDIDATES
+    let url = format!("{}/get", common::HTTPBIN_TLS13_MIRROR);
+    smoke_public_url("httpbin TLS 1.3 mirror", &url, "nghttp2.org");
+}
+
+#[test]
+fn httpbin_helper_requires_a_tls13_capable_mirror() {
+    assert_eq!(
+        common::httpbin_base(),
+        common::HTTPBIN_TLS13_MIRROR,
+        "HTTP-semantics tests must not fall back to a TLS 1.2-only origin"
+    );
+    assert_eq!(
+        common::HTTPBIN_CANDIDATES,
+        &[common::HTTPBIN_TLS13_MIRROR],
+        "the named httpbin smoke has one capability-verified TLS 1.3 target"
     );
 }

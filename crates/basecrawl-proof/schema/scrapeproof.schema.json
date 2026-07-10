@@ -38,6 +38,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "certificate_validation",
         "negotiated_version",
         "sni",
         "server_cert_chain_der",
@@ -48,6 +49,10 @@
         "handshake_transcript_hash"
       ],
       "properties": {
+        "certificate_validation": {
+          "type": "string",
+          "enum": ["not_applicable", "validated", "insecure_diagnostic"]
+        },
         "negotiated_version": { "type": ["string", "null"] },
         "sni": { "type": ["string", "null"] },
         "server_cert_chain_der": { "type": "array", "items": { "type": "string" } },

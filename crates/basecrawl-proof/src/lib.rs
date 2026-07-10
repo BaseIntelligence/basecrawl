@@ -50,10 +50,28 @@ pub struct Request {
     pub formats: Vec<String>,
 }
 
+/// Whether the certificate chain was verified before this TLS evidence was recorded.
+///
+/// Only [`CertificateValidation::Validated`] TLS 1.3 evidence is suitable for a normal
+/// authenticity-capable proof. The explicit insecure diagnostic mode is intentionally carried on
+/// the wire so it cannot be mistaken for a normally validated proof.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CertificateValidation {
+    /// No TLS session occurred, for example for a plain HTTP scrape.
+    #[default]
+    NotApplicable,
+    /// The default WebPKI verifier accepted the peer certificate for the requested server name.
+    Validated,
+    /// The caller explicitly bypassed certificate verification for diagnostic purposes.
+    InsecureDiagnostic,
+}
+
 /// In-process TLS termination capture. Populated by the TLS 1.3 capture layer; at M1 the fields
 /// default to null/empty.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Tls {
+    pub certificate_validation: CertificateValidation,
     pub negotiated_version: Option<String>,
     pub sni: Option<String>,
     pub server_cert_chain_der: Vec<String>,

@@ -8,7 +8,7 @@
 //! handshake metadata from the same connection that carried the response.
 use crate::error::Error;
 use base64::Engine;
-use basecrawl_proof::{RedirectHop, Tls};
+use basecrawl_proof::{CertificateValidation, RedirectHop, Tls};
 use basecrawl_render::{OriginPacer, PacingDeadlineExceeded};
 use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -468,7 +468,13 @@ fn fetch_https(
         .lock()
         .expect("ServerHello wire mutex must not be poisoned")
         .clone();
-    let tls = capture_tls_metadata(&connection, host, &capture, &server_hello_wire)?;
+    let tls = capture_tls_metadata(
+        &connection,
+        host,
+        &capture,
+        &server_hello_wire,
+        config.insecure,
+    )?;
 
     let request = build_http_request(url, host, port, config, credential_origin)?;
     let mut stream = rustls::StreamOwned::new(connection, recorder);
@@ -518,10 +524,10 @@ fn resolve_address(
         .map_err(|_| deadline_elapsed())?
 }
 
-/// Build a rustls configuration with Mozilla roots. TLS 1.3 is preferred and fully captured, while
-/// TLS 1.2 remains enabled only so invalid-certificate test origins can reach the certificate
-/// verifier and be rejected with the correct security error instead of a version-negotiation error.
-/// Resumption is disabled to guarantee each scrape has a complete certificate-bearing handshake.
+/// Build a rustls configuration with Mozilla roots. TLS 1.2 remains enabled only so the default
+/// verifier can reject an invalid legacy peer as `certificate_validation` before its negotiated
+/// version is rejected as unsuitable for authenticity evidence. Resumption is disabled to
+/// guarantee each scrape has a complete certificate-bearing handshake.
 fn tls_config(capture: Arc<TlsCaptureState>, insecure: bool) -> Result<ClientConfig, Error> {
     let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let verifier: Arc<dyn ServerCertVerifier> = if insecure {
@@ -1017,6 +1023,7 @@ fn capture_tls_metadata(
     host: &str,
     capture: &TlsCaptureState,
     server_hello_wire: &ServerHelloWire,
+    insecure: bool,
 ) -> Result<Tls, Error> {
     let version = match connection.protocol_version() {
         Some(rustls::ProtocolVersion::TLSv1_3) => "1.3".to_string(),
@@ -1032,6 +1039,11 @@ fn capture_tls_metadata(
             ))
         }
     };
+    if version != "1.3" && !insecure {
+        return Err(Error::TlsVersionUnsupported {
+            negotiated_version: version,
+        });
+    }
     let certificates = connection.peer_certificates().ok_or_else(|| {
         Error::TlsCapture("server did not provide a certificate chain".to_string())
     })?;
@@ -1101,6 +1113,11 @@ fn capture_tls_metadata(
         .map(|response| base64::prelude::BASE64_STANDARD.encode(response));
 
     Ok(Tls {
+        certificate_validation: if insecure {
+            CertificateValidation::InsecureDiagnostic
+        } else {
+            CertificateValidation::Validated
+        },
         negotiated_version: Some(version),
         sni: Some(host.to_string()),
         server_cert_chain_der: certs

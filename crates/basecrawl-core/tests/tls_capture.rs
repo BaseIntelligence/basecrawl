@@ -157,6 +157,7 @@ fn captures_tls13_chain_ground_truth_and_session_metadata() {
     let proof = scrape_json("https://example.com");
     let tls = &proof["tls"];
 
+    assert_eq!(tls["certificate_validation"], "validated");
     assert_eq!(tls["negotiated_version"], "1.3");
     assert_eq!(tls["sni"], "example.com");
 
@@ -237,6 +238,38 @@ fn tls_chain_hash_is_stable_and_transcript_varies_per_session() {
     );
 }
 
+// A certificate-valid TLS 1.2 session cannot supply the RFC 8446 CertificateVerify transcript
+// primitive or the TLS 1.3 ServerHello key share, so it must never be emitted as a ScrapeProof.
+#[test]
+fn valid_tls12_origin_fails_without_emitting_a_proof() {
+    let rejected = run(&[
+        "https://httpbin.org/get",
+        "--formats",
+        "rawHtml",
+        "--no-js",
+        "--robots",
+        "ignore",
+    ]);
+    assert!(
+        !rejected.status.success(),
+        "a valid TLS 1.2-only origin must not produce a successful ScrapeProof"
+    );
+    assert!(
+        rejected.stdout.is_empty(),
+        "TLS 1.2 rejection must not emit an incomplete proof"
+    );
+    let error: serde_json::Value =
+        serde_json::from_slice(&rejected.stderr).expect("TLS version rejection must be JSON");
+    assert_eq!(error["error"]["kind"], "tls_version_unsupported");
+    assert_eq!(error["error"]["negotiated_version"], "1.2");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("TLS 1.3")),
+        "TLS version rejection must explain the TLS 1.3 requirement: {error}"
+    );
+}
+
 // VAL-CRAWL-084.
 #[test]
 fn invalid_certificates_fail_closed_unless_explicitly_insecure() {
@@ -271,6 +304,10 @@ fn invalid_certificates_fail_closed_unless_explicitly_insecure() {
         );
         let proof: serde_json::Value =
             serde_json::from_slice(&insecure.stdout).expect("insecure fetch must emit a proof");
+        assert_eq!(
+            proof["tls"]["certificate_validation"], "insecure_diagnostic",
+            "an insecure diagnostic capture must not masquerade as normally validated evidence"
+        );
         assert!(
             proof["tls"]["negotiated_version"]
                 .as_str()

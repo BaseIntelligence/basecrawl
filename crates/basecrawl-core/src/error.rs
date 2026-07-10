@@ -51,6 +51,11 @@ pub enum Error {
     #[error("TLS capture failed: {0}")]
     TlsCapture(String),
 
+    #[error(
+        "negotiated TLS version {negotiated_version} cannot produce an authenticity-capable proof; TLS 1.3 is required"
+    )]
+    TlsVersionUnsupported { negotiated_version: String },
+
     #[error("too many redirects: exceeded the maximum of {max} hop(s) while fetching '{url}'")]
     TooManyRedirects { max: usize, url: String },
 
@@ -94,6 +99,7 @@ impl Error {
             Error::Transport(_) => "transport_error",
             Error::CertificateValidation(_) => "certificate_validation",
             Error::TlsCapture(_) => "tls_capture_error",
+            Error::TlsVersionUnsupported { .. } => "tls_version_unsupported",
             Error::TooManyRedirects { .. } => "too_many_redirects",
             Error::Redirect(_) => "redirect_error",
             Error::Fetch(_) => "fetch_error",
@@ -132,6 +138,12 @@ impl Error {
             }
             Error::UnsupportedScheme(scheme) => {
                 obj.insert("scheme".into(), Value::String(scheme.clone()));
+            }
+            Error::TlsVersionUnsupported { negotiated_version } => {
+                obj.insert(
+                    "negotiated_version".into(),
+                    Value::String(negotiated_version.clone()),
+                );
             }
             Error::StructuredExtractionUnsupported => {
                 obj.insert("format".into(), Value::String("json".into()));
