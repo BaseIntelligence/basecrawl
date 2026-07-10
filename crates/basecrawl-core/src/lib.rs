@@ -296,7 +296,6 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
                 );
                 if let Value::Object(metadata) = &mut value {
                     metadata.insert("robotsPolicy".to_string(), robots_decision.to_value());
-                    metadata.insert("robotsPolicyHops".to_string(), document_policy.hops_value());
                 }
                 value
             }
@@ -381,6 +380,12 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
         }
     }
 
+    // Screenshot capture and pagination can each drive new direct or browser document
+    // navigations. Materialize the shared policy recorder only after every format that can append
+    // a document hop has completed, so metadata and the deterministic result hash see the complete
+    // traversal in its recorded order.
+    materialize_robots_policy_hops(&mut formats_produced, &document_policy);
+
     if Instant::now() >= deadline {
         return Err(Error::Timeout("scrape deadline exceeded".to_string()));
     }
@@ -434,6 +439,15 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
         attestation: Attestation::default(),
         sdk_signature: SdkSignature::default(),
     })
+}
+
+fn materialize_robots_policy_hops(
+    formats_produced: &mut BTreeMap<String, Value>,
+    document_policy: &robots::DocumentPolicy,
+) {
+    if let Some(Value::Object(metadata)) = formats_produced.get_mut(Format::Metadata.as_str()) {
+        metadata.insert("robotsPolicyHops".to_string(), document_policy.hops_value());
+    }
 }
 
 /// Fetch and extract a single pagination page: returns its markdown, the HTML used to locate the

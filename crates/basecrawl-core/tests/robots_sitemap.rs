@@ -121,7 +121,11 @@ fn handle_connection(stream: TcpStream, base: &str, requests: &Arc<Mutex<Vec<Str
                 "<?xml version=\"1.0\"?><urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\"><url><loc>{base}/fallback-a</loc></url><url><loc>{base}/fallback-b</loc></url></urlset>"
             ),
         ),
-        "/blocked/open" | "/allowed" | "/sitemap-page" | "/blocked/private" => write_response(
+        "/blocked/open"
+        | "/allowed"
+        | "/sitemap-page"
+        | "/blocked/private"
+        | "/blocked/pagination-next" => write_response(
             peer,
             "200 OK",
             "text/html; charset=utf-8",
@@ -153,6 +157,31 @@ fn handle_connection(stream: TcpStream, base: &str, requests: &Arc<Mutex<Vec<Str
                 write_redirect(peer, "/blocked/private?browser-server-target=1");
             }
         }
+        "/screenshot-hops" => {
+            let request_count = requests
+                .lock()
+                .expect("fixture request log mutex")
+                .iter()
+                .filter(|request| request.as_str() == target)
+                .count();
+            if request_count == 1 {
+                write_response(
+                    peer,
+                    "200 OK",
+                    "text/html; charset=utf-8",
+                    "<!doctype html><html><body><main>SCREENSHOT_DIRECT_START</main></body></html>",
+                );
+            } else {
+                write_redirect(peer, "/screenshot-client?screenshot-client-hop=1");
+            }
+        }
+        "/screenshot-client" => write_response(
+            peer,
+            "200 OK",
+            "text/html; charset=utf-8",
+            "<!doctype html><html><body><main>SCREENSHOT_CLIENT_START</main>\
+             <script>location.replace('/blocked/private?screenshot-client-target=1')</script></body></html>",
+        ),
         "/browser-client-navigate" => {
             let target = if target.contains("observe=1") {
                 "/blocked/private?browser-client-observe-target=1"
@@ -175,6 +204,13 @@ fn handle_connection(stream: TcpStream, base: &str, requests: &Arc<Mutex<Vec<Str
             "text/html; charset=utf-8",
             "<!doctype html><html><body><main>IFRAME_PARENT</main>\
              <iframe src='/blocked/private?iframe-document-target=1'></iframe></body></html>",
+        ),
+        "/pagination-start" => write_response(
+            peer,
+            "200 OK",
+            "text/html; charset=utf-8",
+            "<!doctype html><html><body><main>PAGINATION_START</main>\
+             <a rel='next' href='/blocked/pagination-next?pagination-hop=1'>Next</a></body></html>",
         ),
         _ => write_response(peer, "404 Not Found", "text/plain; charset=utf-8", "not found"),
     }
@@ -444,6 +480,74 @@ fn observe_records_a_denied_browser_client_navigation_without_blocking() {
                 && hop["disposition"].as_str() == Some("denied")
         }),
         "the client navigation target must be recorded as denied: {hops:?}"
+    );
+}
+
+// Metadata is canonicalized before screenshot, so it must be refreshed only after the screenshot
+// browser has completed every top-frame navigation it can trigger.
+#[test]
+fn screenshot_hops_are_materialized_in_metadata_after_redirects_and_client_navigation() {
+    let server = fixture_server();
+    let url = format!("{}/screenshot-hops?observe=1", server.base);
+    let proof = successful_scrape(&[
+        &url,
+        "--formats",
+        "metadata,screenshot",
+        "--robots",
+        "observe",
+    ]);
+    let hops = proof["result"]["formats_produced"]["metadata"]["robotsPolicyHops"]
+        .as_array()
+        .expect("metadata must record every screenshot document hop");
+    let browser_redirect = format!("{}/screenshot-client?screenshot-client-hop=1", server.base);
+    let client_navigation = format!("{}/blocked/private?screenshot-client-target=1", server.base);
+
+    assert_eq!(
+        hops.iter()
+            .map(|hop| (hop["targetUrl"].as_str(), hop["disposition"].as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (Some(url.as_str()), Some("unmatched")),
+            (Some(url.as_str()), Some("unmatched")),
+            (Some(browser_redirect.as_str()), Some("unmatched")),
+            (Some(client_navigation.as_str()), Some("denied")),
+        ],
+        "metadata must preserve direct then screenshot browser hop order"
+    );
+}
+
+// Pagination creates direct fetch and Chromium render document hops after metadata's normal
+// extraction point. Observe mode makes their denied dispositions both inspectable and traversable.
+#[test]
+fn pagination_hops_are_materialized_in_metadata_after_direct_and_rendered_pages() {
+    let server = fixture_server();
+    let url = format!("{}/pagination-start?pagination-hop=1", server.base);
+    let next = format!("{}/blocked/pagination-next?pagination-hop=1", server.base);
+    let proof = successful_scrape(&[
+        &url,
+        "--formats",
+        "markdown,metadata",
+        "--follow-pagination",
+        "--max-pages",
+        "2",
+        "--robots",
+        "observe",
+    ]);
+    let hops = proof["result"]["formats_produced"]["metadata"]["robotsPolicyHops"]
+        .as_array()
+        .expect("metadata must record every paginated document hop");
+
+    assert_eq!(
+        hops.iter()
+            .map(|hop| (hop["targetUrl"].as_str(), hop["disposition"].as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (Some(url.as_str()), Some("unmatched")),
+            (Some(url.as_str()), Some("unmatched")),
+            (Some(next.as_str()), Some("denied")),
+            (Some(next.as_str()), Some("denied")),
+        ],
+        "metadata must preserve initial render, direct pagination, then rendered pagination hops"
     );
 }
 
