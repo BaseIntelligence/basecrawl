@@ -1,0 +1,661 @@
+"""Fail-closed canonical Phala measurement allowlist.
+
+The allowlist is deliberately small and validator-owned.  It contains the six
+static values needed to identify the deployed basecrawl image and its fixed VM
+shape.  RTMR3 is runtime state, so it is validated by replaying the signed
+event log rather than by adding it to the static tuple.
+
+The Phala ``app-compose.json`` hash is calculated with the dstack rules:
+recursively remove JSON ``null`` fields, sort object keys, serialize compactly
+as UTF-8, and hash those exact bytes with SHA-256.  This is not the hash of
+the source YAML alone or of the provider's ``/Info`` response envelope.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import subprocess
+from collections.abc import Iterable, Mapping
+from pathlib import Path
+from typing import Any
+
+CANONICAL_FIELDS = (
+    "mrtd",
+    "rtmr0",
+    "rtmr1",
+    "rtmr2",
+    "compose_hash",
+    "os_image_hash",
+)
+REGISTER_FIELDS = frozenset({"mrtd", "rtmr0", "rtmr1", "rtmr2"})
+HEX96 = re.compile(r"^[0-9a-f]{96}$")
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+DSTACK_COMMIT = "282eeb27d22d8f091ad0fa5a90e638f85cf68751"
+META_DSTACK_COMMIT = "e3655d1390feee3736476f4bda35c4354b4a12fc"
+CATALOG_SLUG = "dstack-0.5.9-bd369a8c"
+CATALOG_OS_IMAGE_HASH = (
+    "bd369a8c2f9edb2b52dad48ac8e0b32dde5f1337c423a506b48d07403a7d8033"
+)
+MEASUREMENT_QEMU_VERSION = "8.0.0"
+
+DSTACK_RUNTIME_EVENT_TYPE = 0x08000001
+RTMR3_INDEX = 3
+REGISTER_BYTES = 48
+QUOTE_HEADER_BYTES = 48
+TD_REPORT_BYTES = 584
+QUOTE_VERSION = 4
+TDX_TEE_TYPE = 0x81
+INTEL_QE_VENDOR_ID = bytes.fromhex("939a7233f79c4ca9940a0db3957f0607")
+EXPECTED_RUNTIME_EVENTS = (
+    "system-preparing",
+    "app-id",
+    "compose-hash",
+    "instance-id",
+    "boot-mr-done",
+    "mr-kms",
+    "os-image-hash",
+    "key-provider",
+    "storage-fs",
+    "system-ready",
+)
+
+
+class MeasurementAllowlistError(ValueError):
+    """The validator measurement configuration is malformed or inconsistent."""
+
+
+def _canonical_json_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            key: _canonical_json_value(item)
+            for key, item in sorted(value.items())
+            if item is not None
+        }
+    if isinstance(value, list):
+        return [_canonical_json_value(item) for item in value]
+    return value
+
+
+def normalize_app_compose(compose: Mapping[str, Any] | str) -> str:
+    """Return the exact dstack-normalized JSON representation."""
+
+    if isinstance(compose, str):
+        try:
+            value = json.loads(compose)
+        except json.JSONDecodeError as exc:
+            raise MeasurementAllowlistError(f"app-compose is not JSON: {exc}") from exc
+    elif isinstance(compose, Mapping):
+        value = compose
+    else:
+        raise MeasurementAllowlistError("app-compose must be a mapping or JSON string")
+    return json.dumps(
+        _canonical_json_value(value),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+def phala_app_compose_hash(compose: Mapping[str, Any] | str | Path) -> str:
+    """Hash a normalized app-compose mapping, JSON string, or JSON file."""
+
+    if isinstance(compose, Path):
+        try:
+            compose = compose.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise MeasurementAllowlistError(f"cannot read app-compose: {exc}") from exc
+    return hashlib.sha256(normalize_app_compose(compose).encode("utf-8")).hexdigest()
+
+
+def _load_json(path: Path, label: str) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MeasurementAllowlistError(f"cannot load {label} {path}: {exc}") from exc
+
+
+def _validate_entry(value: Mapping[str, Any], *, label: str) -> dict[str, str]:
+    if set(value) != set(CANONICAL_FIELDS):
+        raise MeasurementAllowlistError(
+            f"{label} must contain exactly {', '.join(CANONICAL_FIELDS)}"
+        )
+    result: dict[str, str] = {}
+    for field in CANONICAL_FIELDS:
+        item = value.get(field)
+        if not isinstance(item, str):
+            raise MeasurementAllowlistError(f"{label}.{field} must be a string")
+        item = item.strip().lower()
+        pattern = HEX96 if field in REGISTER_FIELDS else HEX64
+        if pattern.fullmatch(item) is None:
+            raise MeasurementAllowlistError(
+                f"{label}.{field} has the wrong digest width"
+            )
+        result[field] = item
+    return result
+
+
+def load_allowlist(path: Path | str) -> list[dict[str, str]]:
+    """Load one or more exact six-field entries, rejecting malformed input."""
+
+    source = Path(path)
+    data = _load_json(source, "measurement allowlist")
+    if isinstance(data, Mapping):
+        data = data.get("entries")
+    if not isinstance(data, list):
+        raise MeasurementAllowlistError("measurement allowlist must be a JSON list")
+    return (
+        [
+            _validate_entry(entry, label=f"allowlist[{index}]")
+            for index, entry in enumerate(data)
+            if isinstance(entry, Mapping)
+        ]
+        if all(isinstance(entry, Mapping) for entry in data)
+        else _raise_entries()
+    )
+
+
+def _raise_entries() -> list[dict[str, str]]:
+    raise MeasurementAllowlistError("every allowlist entry must be an object")
+
+
+def allowlist_contains(
+    candidate: Mapping[str, Any], entries: Iterable[Mapping[str, Any]]
+) -> bool:
+    """Return true only for an exact match across all six canonical fields."""
+
+    try:
+        normalized = _validate_entry(candidate, label="candidate")
+    except MeasurementAllowlistError:
+        return False
+    return any(
+        normalized == _validate_entry(entry, label="allowlist entry")
+        for entry in entries
+    )
+
+
+def _runtime_event_digest(name: str, payload: bytes) -> bytes:
+    return hashlib.sha384(
+        DSTACK_RUNTIME_EVENT_TYPE.to_bytes(4, "little")
+        + b":"
+        + name.encode("utf-8")
+        + b":"
+        + payload
+    ).digest()
+
+
+def _key_provider_payload_is_valid(payload_hex: str) -> bool:
+    try:
+        payload = bytes.fromhex(payload_hex)
+        value = json.loads(payload)
+    except (ValueError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(value, Mapping)
+        and value.get("name") == "kms"
+        and isinstance(value.get("id"), str)
+        and bool(value["id"])
+    )
+
+
+def replay_rtmr3(event_log: Iterable[Mapping[str, Any]]) -> dict[str, str | None]:
+    """Replay IMR3 and verify every runtime-event digest before folding it."""
+
+    register = bytes(REGISTER_BYTES)
+    compose_hash: str | None = None
+    key_provider: str | None = None
+    runtime_events: list[str] = []
+    for index, event in enumerate(event_log):
+        if not isinstance(event, Mapping) or event.get("imr") != RTMR3_INDEX:
+            continue
+        name = event.get("event", "")
+        payload_hex = event.get("event_payload", "")
+        logged_hex = event.get("digest")
+        if (
+            not isinstance(name, str)
+            or not isinstance(payload_hex, str)
+            or not isinstance(logged_hex, str)
+        ):
+            raise MeasurementAllowlistError(f"RTMR3 event {index} is malformed")
+        try:
+            payload = bytes.fromhex(payload_hex)
+            logged = bytes.fromhex(logged_hex)
+        except ValueError as exc:
+            raise MeasurementAllowlistError(f"RTMR3 event {index} is not hex") from exc
+        if len(logged) != REGISTER_BYTES:
+            raise MeasurementAllowlistError(
+                f"RTMR3 event {index} digest is not SHA-384"
+            )
+        event_type = event.get("event_type")
+        if event_type != DSTACK_RUNTIME_EVENT_TYPE:
+            raise MeasurementAllowlistError(
+                f"RTMR3 event {index} has an unsupported event type"
+            )
+        digest = (
+            _runtime_event_digest(name, payload)
+            if event_type == DSTACK_RUNTIME_EVENT_TYPE
+            else logged
+        )
+        if event_type == DSTACK_RUNTIME_EVENT_TYPE and digest != logged:
+            raise MeasurementAllowlistError(f"RTMR3 event {index} digest mismatch")
+        register = hashlib.sha384(register + digest).digest()
+        runtime_events.append(name)
+        if name == "compose-hash":
+            compose_hash = payload.hex()
+        elif name == "key-provider":
+            key_provider = payload.hex()
+    if runtime_events and runtime_events != list(EXPECTED_RUNTIME_EVENTS):
+        raise MeasurementAllowlistError(
+            "RTMR3 event sequence is not the expected boot sequence"
+        )
+    if compose_hash is not None and not HEX64.fullmatch(compose_hash):
+        raise MeasurementAllowlistError("compose-hash event is not a SHA-256 digest")
+    if key_provider is None or not _key_provider_payload_is_valid(key_provider):
+        raise MeasurementAllowlistError("key-provider event is missing")
+    return {
+        "rtmr3": register.hex(),
+        "compose_hash": compose_hash,
+        "key_provider": key_provider,
+    }
+
+
+def validate_reconciliation(
+    path: Path | str,
+    *,
+    allowlist_path: Path | str,
+    app_compose_path: Path | str,
+) -> dict[str, Any]:
+    """Validate the durable evidence record before a caller trusts the tuple."""
+
+    record = _load_json(Path(path), "measurement reconciliation")
+    if not isinstance(record, Mapping) or record.get("status") != "reconciled":
+        raise MeasurementAllowlistError("measurement reconciliation is not reconciled")
+    canonical = _validate_entry(
+        record.get("canonical_measurement", {}),
+        label="canonical_measurement",
+    )
+    allowlist = load_allowlist(allowlist_path)
+    if len(allowlist) != 1 or allowlist[0] != canonical:
+        raise MeasurementAllowlistError("allowlist does not pin the reconciled tuple")
+    app_compose = Path(app_compose_path)
+    if phala_app_compose_hash(app_compose) != canonical["compose_hash"]:
+        raise MeasurementAllowlistError(
+            "normalized app-compose hash does not match tuple"
+        )
+    image = record.get("image")
+    if (
+        not isinstance(image, Mapping)
+        or image.get("image_ref")
+        != "docker.io/mathiiss/basecrawl-cvm@sha256:"
+        "c19d252fec7bb3e3e71c9281da1101312d5f2f09ec15d404a7ff373b3a6dbdd8"
+        or image.get("build_digest")
+        != "sha256:c19d252fec7bb3e3e71c9281da1101312d5f2f09ec15d404a7ff373b3a6dbdd8"
+        or image.get("all_service_images_digest_pinned") is not True
+    ):
+        raise MeasurementAllowlistError("application image identity is not pinned")
+
+    catalog = record.get("catalog")
+    if (
+        not isinstance(catalog, Mapping)
+        or catalog.get("slug") != CATALOG_SLUG
+        or catalog.get("os_image_hash") != CATALOG_OS_IMAGE_HASH
+        or catalog.get("is_dev") is not False
+        or not _catalog_artifacts_match(catalog)
+    ):
+        raise MeasurementAllowlistError(
+            "catalog identity is not the pinned Phala image"
+        )
+    if record.get("source_pins") != {
+        "dstack": DSTACK_COMMIT,
+        "meta_dstack": META_DSTACK_COMMIT,
+    }:
+        raise MeasurementAllowlistError(
+            "source pins do not match the required v0.5.9 pins"
+        )
+    measurement = record.get("dstack_mr")
+    if (
+        not isinstance(measurement, Mapping)
+        or measurement.get("qemu_version") != MEASUREMENT_QEMU_VERSION
+        or measurement.get("cpu") != 1
+        or measurement.get("memory") != "2G"
+        or measurement.get("registers")
+        != {field: canonical[field] for field in ("mrtd", "rtmr0", "rtmr1", "rtmr2")}
+    ):
+        raise MeasurementAllowlistError(
+            "dstack-mr output is not the reconciled live tuple"
+        )
+
+    live_evidence = record.get("live_evidence")
+    if not isinstance(live_evidence, list) or len(live_evidence) < 2:
+        raise MeasurementAllowlistError(
+            "at least two live evidence records are required"
+        )
+    for index, evidence in enumerate(live_evidence):
+        _validate_live_evidence(
+            evidence,
+            index=index,
+            canonical=canonical,
+            allowlisted_compose_hash=canonical["compose_hash"],
+        )
+    replay_record = record.get("live_event_replay")
+    if not isinstance(replay_record, Mapping) or not isinstance(
+        replay_record.get("evidence"), list
+    ):
+        raise MeasurementAllowlistError("per-CVM RTMR3 replay evidence is missing")
+    replay_by_name = {
+        item.get("cvm_name"): item
+        for item in replay_record["evidence"]
+        if isinstance(item, Mapping)
+    }
+    for evidence in live_evidence:
+        replay = replay_by_name.get(evidence.get("cvm_name"))
+        if (
+            not isinstance(replay, Mapping)
+            or replay.get("rtmr3") != evidence.get("rtmr3")
+            or replay.get("replayed_rtmr3") != evidence.get("rtmr3")
+            or replay.get("event_names") != list(EXPECTED_RUNTIME_EVENTS)
+        ):
+            raise MeasurementAllowlistError(
+                "recorded RTMR3 replay evidence does not match"
+            )
+    live_info = record.get("live_info")
+    if (
+        not isinstance(live_info, Mapping)
+        or live_info.get("catalog_identity_confirmed") is not True
+        or live_info.get("os_image_hash") != canonical["os_image_hash"]
+        or live_info.get("compose_hash") != canonical["compose_hash"]
+        or live_info.get("app_compose_sha256") != canonical["compose_hash"]
+    ):
+        raise MeasurementAllowlistError("live /Info identity does not match the tuple")
+    quote_verification = record.get("live_quote_verification")
+    if (
+        not isinstance(quote_verification, Mapping)
+        or quote_verification.get("status") != "UpToDate"
+        or quote_verification.get("advisory_ids") != []
+        or quote_verification.get("qe_status") != "UpToDate"
+        or quote_verification.get("platform_status") != "UpToDate"
+    ):
+        raise MeasurementAllowlistError("live quote TCB posture is not fully UpToDate")
+    return dict(record)
+
+
+def _catalog_artifacts_match(catalog: Mapping[str, Any]) -> bool:
+    metadata_path = catalog.get("metadata_source")
+    metadata_sha256 = catalog.get("metadata_sha256")
+    release_hashes = catalog.get("release_files_sha256")
+    if (
+        not isinstance(metadata_path, str)
+        or not isinstance(metadata_sha256, str)
+        or HEX64.fullmatch(metadata_sha256) is None
+        or not isinstance(release_hashes, Mapping)
+    ):
+        return False
+    path = Path(metadata_path)
+    if not path.is_file():
+        return False
+    try:
+        if hashlib.sha256(path.read_bytes()).hexdigest() != metadata_sha256:
+            return False
+        for name, expected in release_hashes.items():
+            if not isinstance(name, str) or not isinstance(expected, str):
+                return False
+            artifact = path.parent / name
+            if (
+                not artifact.is_file()
+                or hashlib.sha256(artifact.read_bytes()).hexdigest() != expected
+            ):
+                return False
+    except OSError:
+        return False
+    return True
+
+
+def _validate_live_evidence(
+    evidence: Any,
+    *,
+    index: int,
+    canonical: Mapping[str, str],
+    allowlisted_compose_hash: str,
+) -> None:
+    if not isinstance(evidence, Mapping):
+        raise MeasurementAllowlistError(f"live_evidence[{index}] must be an object")
+    quote_path = evidence.get("quote_path")
+    attestation_path = evidence.get("attestation_path")
+    if not isinstance(quote_path, str) or not isinstance(attestation_path, str):
+        raise MeasurementAllowlistError(f"live_evidence[{index}] paths are missing")
+    info_path = evidence.get("info_path")
+    if not isinstance(info_path, str):
+        raise MeasurementAllowlistError(f"live_evidence[{index}] info_path is missing")
+    quote_file = Path(quote_path)
+    attestation_file = Path(attestation_path)
+    info_file = Path(info_path)
+    if (
+        not quote_file.is_file()
+        or not attestation_file.is_file()
+        or not info_file.is_file()
+    ):
+        raise MeasurementAllowlistError(f"live_evidence[{index}] paths are not files")
+    quote_hex = quote_file.read_text(encoding="utf-8").strip()
+    try:
+        quote = bytes.fromhex(quote_hex)
+    except ValueError as exc:
+        raise MeasurementAllowlistError(
+            f"live_evidence[{index}] quote is not hex"
+        ) from exc
+    if len(quote) < 584:
+        raise MeasurementAllowlistError(f"live_evidence[{index}] quote is truncated")
+    _verify_quote(quote, quote_path=quote_file, index=index)
+    signed = {
+        "mrtd": quote[48 + 136 : 48 + 136 + REGISTER_BYTES].hex(),
+        "rtmr0": quote[48 + 328 : 48 + 328 + REGISTER_BYTES].hex(),
+        "rtmr1": quote[48 + 376 : 48 + 376 + REGISTER_BYTES].hex(),
+        "rtmr2": quote[48 + 424 : 48 + 424 + REGISTER_BYTES].hex(),
+        "rtmr3": quote[48 + 472 : 48 + 472 + REGISTER_BYTES].hex(),
+    }
+    if any(
+        signed[field] != canonical[field]
+        for field in CANONICAL_FIELDS
+        if field in REGISTER_FIELDS
+    ):
+        raise MeasurementAllowlistError(f"live_evidence[{index}] quote registers drift")
+    mr_config_id = quote[48 + 184 : 48 + 184 + REGISTER_BYTES]
+    if len(mr_config_id) != REGISTER_BYTES or mr_config_id[0] != 1:
+        raise MeasurementAllowlistError(
+            f"live_evidence[{index}] mr_config_id is malformed"
+        )
+    if mr_config_id[1:33].hex() != allowlisted_compose_hash:
+        raise MeasurementAllowlistError(
+            f"live_evidence[{index}] mr_config_id compose drift"
+        )
+    attestation = _load_json(attestation_file, "live attestation")
+    certificates = (
+        attestation.get("app_certificates")
+        if isinstance(attestation, Mapping)
+        else None
+    )
+    app_id = evidence.get("app_id")
+    if not isinstance(app_id, str) or not isinstance(certificates, list):
+        raise MeasurementAllowlistError(
+            f"live_evidence[{index}] certificate binding is missing"
+        )
+    app_certificate = next(
+        (
+            certificate
+            for certificate in certificates
+            if isinstance(certificate, Mapping)
+            and certificate.get("quote") == quote_hex
+        ),
+        None,
+    )
+    if (
+        not isinstance(app_certificate, Mapping)
+        or app_certificate.get("app_id") != app_id
+        or not any(
+            isinstance(certificate, Mapping) and certificate.get("app_id") == app_id
+            for certificate in certificates
+        )
+    ):
+        raise MeasurementAllowlistError(
+            f"live_evidence[{index}] quote is not bound to the recorded app certificate"
+        )
+    tcb_info = attestation.get("tcb_info") if isinstance(attestation, Mapping) else None
+    if not isinstance(tcb_info, Mapping):
+        raise MeasurementAllowlistError(f"live_evidence[{index}] has no tcb_info")
+    for field in (*REGISTER_FIELDS, "rtmr3"):
+        if tcb_info.get(field) != signed[field]:
+            raise MeasurementAllowlistError(
+                f"live_evidence[{index}] tcb_info.{field} does not match quote"
+            )
+    event_log = tcb_info.get("event_log")
+    if not isinstance(event_log, list):
+        raise MeasurementAllowlistError(f"live_evidence[{index}] has no event_log")
+    replay = replay_rtmr3(event_log)
+    if replay["rtmr3"] != signed["rtmr3"]:
+        raise MeasurementAllowlistError(f"live_evidence[{index}] RTMR3 replay mismatch")
+    if replay["compose_hash"] != allowlisted_compose_hash:
+        raise MeasurementAllowlistError(
+            f"live_evidence[{index}] compose-hash event mismatch"
+        )
+    if not replay["key_provider"]:
+        raise MeasurementAllowlistError(
+            f"live_evidence[{index}] key-provider event missing"
+        )
+    event_names = [
+        event.get("event")
+        for event in event_log
+        if isinstance(event, Mapping) and event.get("imr") == RTMR3_INDEX
+    ]
+    if event_names != list(EXPECTED_RUNTIME_EVENTS):
+        raise MeasurementAllowlistError(
+            f"live_evidence[{index}] RTMR3 event sequence is not the expected boot sequence"
+        )
+    app_id_events = [
+        event
+        for event in event_log
+        if isinstance(event, Mapping)
+        and event.get("imr") == RTMR3_INDEX
+        and event.get("event") == "app-id"
+    ]
+    if len(app_id_events) != 1 or app_id_events[0].get("event_payload") != app_id:
+        raise MeasurementAllowlistError(f"live_evidence[{index}] app-id event drift")
+    os_image_events = [
+        event
+        for event in event_log
+        if isinstance(event, Mapping)
+        and event.get("imr") == RTMR3_INDEX
+        and event.get("event") == "os-image-hash"
+    ]
+    if (
+        len(os_image_events) != 1
+        or os_image_events[0].get("event_payload") != canonical["os_image_hash"]
+    ):
+        raise MeasurementAllowlistError(
+            f"live_evidence[{index}] os-image-hash event drift"
+        )
+    info = _load_json(info_file, "live /Info")
+    os_info = info.get("os") if isinstance(info, Mapping) else None
+    if (
+        not isinstance(info, Mapping)
+        or info.get("status") != "running"
+        or info.get("app_id") != app_id
+        or info.get("name") != evidence.get("cvm_name")
+        or not isinstance(os_info, Mapping)
+        or os_info.get("name") != "dstack-0.5.9"
+        or os_info.get("version") != "0.5.9"
+        or os_info.get("is_dev") is not False
+        or os_info.get("os_image_hash") != canonical["os_image_hash"]
+        or info.get("compose_hash") != allowlisted_compose_hash
+    ):
+        raise MeasurementAllowlistError(f"live_evidence[{index}] /Info identity drift")
+    compose_file = info.get("compose_file")
+    if not isinstance(compose_file, Mapping):
+        raise MeasurementAllowlistError(
+            f"live_evidence[{index}] /Info has no compose_file"
+        )
+    if (
+        phala_app_compose_hash(
+            {key: value for key, value in compose_file.items() if value is not None}
+        )
+        != allowlisted_compose_hash
+    ):
+        raise MeasurementAllowlistError(
+            f"live_evidence[{index}] /Info app-compose hash drift"
+        )
+    if evidence.get("rtmr3") != signed["rtmr3"]:
+        raise MeasurementAllowlistError(f"live_evidence[{index}] recorded RTMR3 drift")
+
+
+def _verify_quote(quote: bytes, *, quote_path: Path, index: int) -> None:
+    """Require dcap-qvl to validate the signed quote and its production TDX report."""
+
+    if (
+        len(quote) < QUOTE_HEADER_BYTES + TD_REPORT_BYTES + 4
+        or int.from_bytes(quote[0:2], "little") != QUOTE_VERSION
+        or int.from_bytes(quote[4:8], "little") != TDX_TEE_TYPE
+        or quote[8:12] != bytes(4)
+        or quote[12:28] != INTEL_QE_VENDOR_ID
+    ):
+        raise MeasurementAllowlistError(f"live_evidence[{index}] is not a TDX quote v4")
+    signed_prefix = QUOTE_HEADER_BYTES + TD_REPORT_BYTES
+    signature_length = int.from_bytes(
+        quote[signed_prefix : signed_prefix + 4], "little"
+    )
+    if signature_length < 584 or signed_prefix + 4 + signature_length > len(quote):
+        raise MeasurementAllowlistError(
+            f"live_evidence[{index}] quote length is malformed"
+        )
+    try:
+        result = subprocess.run(
+            ["dcap-qvl", "verify", "--hex", str(quote_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise MeasurementAllowlistError(
+            f"live_evidence[{index}] dcap-qvl could not run"
+        ) from exc
+    if result.returncode != 0:
+        raise MeasurementAllowlistError(
+            f"live_evidence[{index}] quote verification failed"
+        )
+    try:
+        verdict = json.loads(result.stdout.splitlines()[0])
+    except (IndexError, json.JSONDecodeError) as exc:
+        raise MeasurementAllowlistError(
+            f"live_evidence[{index}] dcap-qvl returned invalid JSON"
+        ) from exc
+    if (
+        verdict.get("status") != "UpToDate"
+        or verdict.get("advisory_ids") != []
+        or not isinstance(verdict.get("qe_status"), Mapping)
+        or verdict["qe_status"].get("status") != "UpToDate"
+        or not isinstance(verdict.get("platform_status"), Mapping)
+        or verdict["platform_status"].get("status") != "UpToDate"
+        or verdict.get("report", {}).get("TD10", {}).get("td_attributes")
+        != "0000001000000000"
+    ):
+        raise MeasurementAllowlistError(
+            f"live_evidence[{index}] quote TCB or production posture is not acceptable"
+        )
+
+
+__all__ = [
+    "CANONICAL_FIELDS",
+    "CATALOG_OS_IMAGE_HASH",
+    "CATALOG_SLUG",
+    "DSTACK_COMMIT",
+    "MEASUREMENT_QEMU_VERSION",
+    "META_DSTACK_COMMIT",
+    "MeasurementAllowlistError",
+    "allowlist_contains",
+    "load_allowlist",
+    "normalize_app_compose",
+    "phala_app_compose_hash",
+    "replay_rtmr3",
+    "validate_reconciliation",
+]

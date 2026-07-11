@@ -120,7 +120,9 @@ def _normalized_compose(text: str) -> dict[str, Any]:
     try:
         document = json.loads(proc.stdout)
     except json.JSONDecodeError as error:
-        raise ReproducibilityError(f"docker compose returned invalid JSON: {error}") from error
+        raise ReproducibilityError(
+            f"docker compose returned invalid JSON: {error}"
+        ) from error
     if not isinstance(document, dict):
         raise ReproducibilityError("normalized Compose document is not an object")
     return document
@@ -182,7 +184,9 @@ def validate_definitions() -> dict[str, Any]:
     if compose.unpinned_services:
         problems.append(f"unpinned Compose services: {compose.unpinned_services!r}")
     if compose.missing_image_services:
-        problems.append(f"Compose services without images: {compose.missing_image_services!r}")
+        problems.append(
+            f"Compose services without images: {compose.missing_image_services!r}"
+        )
     if not compose.mounts_dstack_socket:
         problems.append("Compose does not mount /var/run/dstack.sock")
     dockerfile_text = DOCKERFILE.read_text(encoding="utf-8").lower()
@@ -231,14 +235,18 @@ def build_command(
 def build_once(*, output: Path, metadata: Path) -> str:
     proc = subprocess.run(build_command(output=output, metadata=metadata), check=False)
     if proc.returncode != 0:
-        raise ReproducibilityError(f"image build failed with exit code {proc.returncode}")
+        raise ReproducibilityError(
+            f"image build failed with exit code {proc.returncode}"
+        )
     try:
         build_metadata = json.loads(metadata.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ReproducibilityError(f"invalid BuildKit metadata: {error}") from error
     digest = build_metadata.get("containerimage.digest")
     if not isinstance(digest, str) or not _BUILD_DIGEST.fullmatch(digest):
-        raise ReproducibilityError(f"BuildKit returned an invalid image digest: {digest!r}")
+        raise ReproducibilityError(
+            f"BuildKit returned an invalid image digest: {digest!r}"
+        )
     return digest
 
 
@@ -259,7 +267,9 @@ def check_builds(*, count: int = 2, output_dir: Path | None = None) -> list[str]
         for index in range(1, count + 1)
     ]
     if len(set(digests)) != 1:
-        raise ReproducibilityError(f"build_digest drift across independent builds: {digests!r}")
+        raise ReproducibilityError(
+            f"build_digest drift across independent builds: {digests!r}"
+        )
     return digests
 
 
@@ -451,7 +461,9 @@ def _require_live_provenance(entry: dict[str, Any], index: int) -> str:
         )
     live_compose = compose_info.get("docker_compose_file")
     if not isinstance(live_compose, str):
-        raise ReproducibilityError(f"evidence[{index}] live CVM has no Compose definition")
+        raise ReproducibilityError(
+            f"evidence[{index}] live CVM has no Compose definition"
+        )
     live_report = validate_compose(live_compose)
     if live_report.unpinned_services or not live_report.mounts_dstack_socket:
         raise ReproducibilityError(
@@ -487,7 +499,9 @@ def assert_reproducible_evidence(entries: Sequence[dict[str, Any]]) -> dict[str,
     """Reject any image, register, image-identity, or compose-hash drift."""
 
     if len(entries) < 2:
-        raise ReproducibilityError("at least two independent deployment records are required")
+        raise ReproducibilityError(
+            "at least two independent deployment records are required"
+        )
     for index, entry in enumerate(entries):
         _validate_evidence(entry, index)
     baseline = entries[0]
@@ -523,8 +537,12 @@ def _load_evidence(paths: Sequence[Path]) -> list[dict[str, Any]]:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("validate", help="validate immutable image and Compose definitions")
-    build_parser = subparsers.add_parser("check-builds", help="build independently and compare")
+    subparsers.add_parser(
+        "validate", help="validate immutable image and Compose definitions"
+    )
+    build_parser = subparsers.add_parser(
+        "check-builds", help="build independently and compare"
+    )
     build_parser.add_argument("--builds", type=int, default=2)
     build_parser.add_argument("--output-dir", type=Path)
     evidence_parser = subparsers.add_parser(
@@ -537,7 +555,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "validate":
             result: Any = validate_definitions()
         elif args.command == "check-builds":
-            result = {"digests": check_builds(count=args.builds, output_dir=args.output_dir)}
+            result = {
+                "digests": check_builds(count=args.builds, output_dir=args.output_dir)
+            }
         else:
             evidence = _load_evidence(args.evidence)
             build_refs = [
@@ -548,7 +568,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ReproducibilityError(
                     f"build references are not independent: {build_refs!r}"
                 )
-            result = {"reproducible": True, "baseline": assert_reproducible_evidence(evidence)}
+            result = {
+                "reproducible": True,
+                "baseline": assert_reproducible_evidence(evidence),
+            }
     except ReproducibilityError as error:
         print(json.dumps({"reproducible": False, "error": str(error)}, sort_keys=True))
         return 1

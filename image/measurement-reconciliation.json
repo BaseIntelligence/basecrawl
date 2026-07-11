@@ -1,0 +1,198 @@
+{
+  "canonical_measurement": {
+    "compose_hash": "ac95f779827adb9a8f10b45fa0906e37b31148e6ea1e69e703b9afde13321104",
+    "mrtd": "f06dfda6dce1cf904d4e2bab1dc370634cf95cefa2ceb2de2eee127c9382698090d7a4a13e14c536ec6c9c3c8fa87077",
+    "os_image_hash": "bd369a8c2f9edb2b52dad48ac8e0b32dde5f1337c423a506b48d07403a7d8033",
+    "rtmr0": "68102e7b524af310f7b7d426ce75481e36c40f5d513a9009c046e9d37e31551f0134d954b496a3357fd61d03f07ffe96",
+    "rtmr1": "07e6f51aa763abfe75c3ddfbf4f425fe3f0ceff66d807a75e049303dce9addf68e7218729bd419638af63a370f65878c",
+    "rtmr2": "df67e467e60edc1737bcf8e682d48131bfb427f523226aa7f197a7608e9b3784783fa759ef5b28191fa12f9ddb36b858"
+  },
+  "catalog": {
+    "digest_txt": "bd369a8c2f9edb2b52dad48ac8e0b32dde5f1337c423a506b48d07403a7d8033",
+    "is_dev": false,
+    "metadata_sha256": "d166e9ffcb3c556983956fd6e81ba8114cd0a3fe4bbcdb1bdf085ac86f678eb0",
+    "metadata_source": "/tmp/dstack-0.5.9-official-release/dstack-0.5.9/metadata.json",
+    "name": "dstack-0.5.9",
+    "os_image_hash": "bd369a8c2f9edb2b52dad48ac8e0b32dde5f1337c423a506b48d07403a7d8033",
+    "release_files_sha256": {
+      "bzImage": "92ceba363abfd655c4f1d3e6fe0df44868436dc4c25cf86efb11adf6c6db31dd",
+      "initramfs.cpio.gz": "4662c4f04f56cb08ab1074da7307dda513468d02ee6e6b6d934373b07a8b3899",
+      "metadata.json": "d166e9ffcb3c556983956fd6e81ba8114cd0a3fe4bbcdb1bdf085ac86f678eb0",
+      "ovmf.fd": "76888ce69c91aed86c43f840b913899b40b981964b7ce6018667f91ad06301f0",
+      "rootfs.img.verity": "e92ad3aeae158f08706f634509f756d6d838c81dd08eded68cc4aab041fe7fd8"
+    },
+    "slug": "dstack-0.5.9-bd369a8c",
+    "version": "0.5.9"
+  },
+  "cleanup": {
+    "phala_cvms_total_after_cleanup": 0,
+    "temporary_cvms_deleted": true
+  },
+  "dstack_mr": {
+    "binary": "/root/.cargo/bin/dstack-mr",
+    "cpu": 1,
+    "memory": "2G",
+    "metadata_path": "/tmp/dstack-0.5.9-official-release/dstack-0.5.9/metadata.json",
+    "metadata_sha256": "d166e9ffcb3c556983956fd6e81ba8114cd0a3fe4bbcdb1bdf085ac86f678eb0",
+    "qemu_version": "8.0.0",
+    "registers": {
+      "mrtd": "f06dfda6dce1cf904d4e2bab1dc370634cf95cefa2ceb2de2eee127c9382698090d7a4a13e14c536ec6c9c3c8fa87077",
+      "rtmr0": "68102e7b524af310f7b7d426ce75481e36c40f5d513a9009c046e9d37e31551f0134d954b496a3357fd61d03f07ffe96",
+      "rtmr1": "07e6f51aa763abfe75c3ddfbf4f425fe3f0ceff66d807a75e049303dce9addf68e7218729bd419638af63a370f65878c",
+      "rtmr2": "df67e467e60edc1737bcf8e682d48131bfb427f523226aa7f197a7608e9b3784783fa759ef5b28191fa12f9ddb36b858"
+    },
+    "version": "dstack-mr-cli 0.1.0"
+  },
+  "image": {
+    "all_service_images_digest_pinned": true,
+    "build_digest": "sha256:c19d252fec7bb3e3e71c9281da1101312d5f2f09ec15d404a7ff373b3a6dbdd8",
+    "compose_file": "docker-compose.yml",
+    "image_ref": "docker.io/mathiiss/basecrawl-cvm@sha256:c19d252fec7bb3e3e71c9281da1101312d5f2f09ec15d404a7ff373b3a6dbdd8"
+  },
+  "live_event_replay": {
+    "compose_hash_event": "ac95f779827adb9a8f10b45fa0906e37b31148e6ea1e69e703b9afde13321104",
+    "event_log_index": 3,
+    "evidence": [
+      {
+        "cvm_name": "basecrawl-repro-51e0de73-c",
+        "event_names": [
+          "system-preparing",
+          "app-id",
+          "compose-hash",
+          "instance-id",
+          "boot-mr-done",
+          "mr-kms",
+          "os-image-hash",
+          "key-provider",
+          "storage-fs",
+          "system-ready"
+        ],
+        "replayed_rtmr3": "9e0b76e7f519538980b9002e7dae6b3619f582b2f79e5853397637c3cb05fcdb37884fb744a5b58b340dfd3b98f8015d",
+        "rtmr3": "9e0b76e7f519538980b9002e7dae6b3619f582b2f79e5853397637c3cb05fcdb37884fb744a5b58b340dfd3b98f8015d"
+      },
+      {
+        "cvm_name": "basecrawl-repro-51e0de73-d",
+        "event_names": [
+          "system-preparing",
+          "app-id",
+          "compose-hash",
+          "instance-id",
+          "boot-mr-done",
+          "mr-kms",
+          "os-image-hash",
+          "key-provider",
+          "storage-fs",
+          "system-ready"
+        ],
+        "replayed_rtmr3": "6eff54e7ba177a401f3ce77c9c84d1496cc99442215dacefbb0b301c9be18b452d5a390e301fadc2f3c5979084452a41",
+        "rtmr3": "6eff54e7ba177a401f3ce77c9c84d1496cc99442215dacefbb0b301c9be18b452d5a390e301fadc2f3c5979084452a41"
+      }
+    ],
+    "expected_events": [
+      "system-preparing",
+      "app-id",
+      "compose-hash",
+      "instance-id",
+      "boot-mr-done",
+      "mr-kms",
+      "os-image-hash",
+      "key-provider",
+      "storage-fs",
+      "system-ready"
+    ],
+    "key_provider_event_present": true,
+    "os_image_hash_event": "bd369a8c2f9edb2b52dad48ac8e0b32dde5f1337c423a506b48d07403a7d8033",
+    "quote_rtmr3": "9e0b76e7f519538980b9002e7dae6b3619f582b2f79e5853397637c3cb05fcdb37884fb744a5b58b340dfd3b98f8015d",
+    "replayed_rtmr3": "9e0b76e7f519538980b9002e7dae6b3619f582b2f79e5853397637c3cb05fcdb37884fb744a5b58b340dfd3b98f8015d",
+    "runtime_event_type": 134217729
+  },
+  "live_evidence": [
+    {
+      "app_id": "a0025435343fb0aa6a3dda1f0993ab55d4799a0b",
+      "attestation_path": "/tmp/basecrawl-cvm-c-attestation.json",
+      "cvm_name": "basecrawl-repro-51e0de73-c",
+      "event_names": [
+        "system-preparing",
+        "app-id",
+        "compose-hash",
+        "instance-id",
+        "boot-mr-done",
+        "mr-kms",
+        "os-image-hash",
+        "key-provider",
+        "storage-fs",
+        "system-ready"
+      ],
+      "info_path": "/tmp/basecrawl-cvm-c-get.json",
+      "quote_path": "/tmp/basecrawl-quote-c.hex",
+      "quote_rtmr3": "9e0b76e7f519538980b9002e7dae6b3619f582b2f79e5853397637c3cb05fcdb37884fb744a5b58b340dfd3b98f8015d",
+      "replayed_rtmr3": "9e0b76e7f519538980b9002e7dae6b3619f582b2f79e5853397637c3cb05fcdb37884fb744a5b58b340dfd3b98f8015d",
+      "rtmr3": "9e0b76e7f519538980b9002e7dae6b3619f582b2f79e5853397637c3cb05fcdb37884fb744a5b58b340dfd3b98f8015d"
+    },
+    {
+      "app_id": "a7a6f6c541f50d7ed81005752b68c4300571fdbc",
+      "attestation_path": "/tmp/basecrawl-cvm-d-attestation.json",
+      "cvm_name": "basecrawl-repro-51e0de73-d",
+      "event_names": [
+        "system-preparing",
+        "app-id",
+        "compose-hash",
+        "instance-id",
+        "boot-mr-done",
+        "mr-kms",
+        "os-image-hash",
+        "key-provider",
+        "storage-fs",
+        "system-ready"
+      ],
+      "info_path": "/tmp/basecrawl-cvm-d-get.json",
+      "quote_path": "/tmp/basecrawl-quote-d.hex",
+      "quote_rtmr3": "6eff54e7ba177a401f3ce77c9c84d1496cc99442215dacefbb0b301c9be18b452d5a390e301fadc2f3c5979084452a41",
+      "replayed_rtmr3": "6eff54e7ba177a401f3ce77c9c84d1496cc99442215dacefbb0b301c9be18b452d5a390e301fadc2f3c5979084452a41",
+      "rtmr3": "6eff54e7ba177a401f3ce77c9c84d1496cc99442215dacefbb0b301c9be18b452d5a390e301fadc2f3c5979084452a41"
+    }
+  ],
+  "live_info": {
+    "app_compose_path": "phala-app-compose.json",
+    "app_compose_sha256": "ac95f779827adb9a8f10b45fa0906e37b31148e6ea1e69e703b9afde13321104",
+    "catalog_identity_confirmed": true,
+    "compose_hash": "ac95f779827adb9a8f10b45fa0906e37b31148e6ea1e69e703b9afde13321104",
+    "os_image_hash": "bd369a8c2f9edb2b52dad48ac8e0b32dde5f1337c423a506b48d07403a7d8033"
+  },
+  "live_quote_verification": {
+    "advisory_ids": [],
+    "platform_status": "UpToDate",
+    "production_td": true,
+    "qe_status": "UpToDate",
+    "quote_version": 4,
+    "status": "UpToDate",
+    "td_attributes": "0000001000000000",
+    "tool": "dcap-qvl"
+  },
+  "local_source_build": {
+    "git_revision": "<unknown>",
+    "metadata_path": "/tmp/repo-analysis/meta-dstack/repro-build/dist/dstack-0.5.9/metadata.json",
+    "metadata_sha256": "7763b1f1c374f8a4f0c4c40f52f5cb8ec213ed03494d2d3588a5058c7010deca",
+    "rootfs_hash": "526ff6fd10c96fdcbafd757489c4499d0a4385d76472302cdadc5ebba749908a",
+    "rootfs_img_verity_sha256": "011b7131f003453f6ca91c333ddf8fa0cf36ea616234f21770046992685c805c"
+  },
+  "local_vs_live_explanation": {
+    "differences": [
+      "The local source-build metadata has rootfs_hash=526ff6fd... and git_revision=<unknown>, while the catalog release has rootfs_hash=a2d0a2af... and git_revision=e3655d1390feee3736476f4bda35c4354b4a12fc.",
+      "The catalog artifact is measured with QEMU 8.0.0. The dstack-mr QEMU 9.x path produces the local source-build MRTD/RTMR0 tuple, so the prior mismatch was a measurement-tool configuration mismatch, not an unexplained live image identity."
+    ],
+    "local_qemu_9_registers": {
+      "mrtd": "b24d3b24e9e3c16012376b52362ca09856c4adecb709d5fac33addf1c47e193da075b125b6c364115771390a5461e217",
+      "rtmr0": "15ee1dc6ec6cb4d19360f14eb6969d36f4d8bda83775690611229a7d0434d5dd025095362b41dc8cea8d5ce81f4977c8",
+      "rtmr1": "d016063eb4bad64c3a6754671dc0d08190fb8d1d35004d1c22f07d21fbd9a9b925a19001e9e803c181fab660080bb982",
+      "rtmr2": "156feea88f1211ee3a61a206ed542afe44eefda8eac1af273203fcbec60e06b7e0862cd38b11210b8d362be4e57ab569"
+    },
+    "official_qemu_8_matches_live": true,
+    "official_qemu_9_matches_local_source_build": true
+  },
+  "source_pins": {
+    "dstack": "282eeb27d22d8f091ad0fa5a90e638f85cf68751",
+    "meta_dstack": "e3655d1390feee3736476f4bda35c4354b4a12fc"
+  },
+  "status": "reconciled"
+}

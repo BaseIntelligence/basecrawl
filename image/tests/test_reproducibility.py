@@ -6,6 +6,7 @@ import sys
 import unittest
 from pathlib import Path
 
+# ruff: noqa: E402
 
 IMAGE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(IMAGE_DIR))
@@ -43,10 +44,15 @@ class StaticDefinitionTests(unittest.TestCase):
         self.assertGreaterEqual(len(report.external_images), 2)
         self.assertEqual(report.unpinned_images, ())
         self.assertTrue(
-            all(re.search(r"@sha256:[0-9a-f]{64}$", image) for image in report.external_images)
+            all(
+                re.search(r"@sha256:[0-9a-f]{64}$", image)
+                for image in report.external_images
+            )
         )
 
-    def test_dockerfile_uses_locked_toolchain_without_os_package_installers(self) -> None:
+    def test_dockerfile_uses_locked_toolchain_without_os_package_installers(
+        self,
+    ) -> None:
         text = (IMAGE_DIR / "Dockerfile").read_text()
         self.assertRegex(text.splitlines()[0], r"^# syntax=.+@sha256:[0-9a-f]{64}$")
         self.assertIn("cargo build --release --locked", text)
@@ -54,7 +60,9 @@ class StaticDefinitionTests(unittest.TestCase):
         self.assertNotIn("ARG BUILD_IMAGE", text)
         self.assertNotIn("ARG RUNTIME_IMAGE", text)
         self.assertNotIn("rustup", text.lower())
-        self.assertNotRegex(text, r"(?im)^\s*RUN\s+.*\b(?:apt|apt-get|apk|dnf|yum)\s+install\b")
+        self.assertNotRegex(
+            text, r"(?im)^\s*RUN\s+.*\b(?:apt|apt-get|apk|dnf|yum)\s+install\b"
+        )
         self.assertNotIn("playwright install --with-deps", text.lower())
 
     def test_chromium_and_runtime_os_are_supplied_by_one_pinned_image(self) -> None:
@@ -98,7 +106,9 @@ services:
         self.assertIn("--provenance=false", command)
         self.assertIn("--sbom=false", command)
         self.assertIn("SOURCE_DATE_EPOCH=1700000000", joined)
-        self.assertIn("type=oci,dest=/tmp/basecrawl-image.tar,rewrite-timestamp=true", joined)
+        self.assertIn(
+            "type=oci,dest=/tmp/basecrawl-image.tar,rewrite-timestamp=true", joined
+        )
         self.assertIn("--platform linux/amd64", joined)
 
 
@@ -140,8 +150,8 @@ class ReproducibilityEvidenceTests(unittest.TestCase):
 
     def test_image_ref_digest_must_equal_build_and_compose_digest(self) -> None:
         evidence = matching_evidence()
-        evidence[1]["image_ref"] = (
-            "docker.io/mathiiss/basecrawl-cvm@sha256:" + ("e" * 64)
+        evidence[1]["image_ref"] = "docker.io/mathiiss/basecrawl-cvm@sha256:" + (
+            "e" * 64
         )
         with self.assertRaisesRegex(repro.ReproducibilityError, "build_digest"):
             repro.assert_reproducible_evidence(evidence)
