@@ -6,6 +6,7 @@
 //! (TLS 1.3 capture, format producers, canonicalization, egress/geo, attestation) are layered
 //! on by subsequent features.
 
+pub mod attestation;
 pub mod canonical;
 pub mod charset;
 pub mod content;
@@ -96,6 +97,8 @@ pub struct ScrapeOptions {
     /// Handling for an origin's robots policy. The default is enforce: covered denied paths are
     /// never fetched, while allowed/unmatched paths proceed with an observable metadata decision.
     pub robots_policy: RobotsPolicy,
+    /// Request a genuine quote from the mounted dstack guest agent after assembling the proof.
+    pub attest: bool,
 }
 
 impl Default for ScrapeOptions {
@@ -123,6 +126,7 @@ impl Default for ScrapeOptions {
             follow_pagination: false,
             max_pages: DEFAULT_MAX_PAGES,
             robots_policy: RobotsPolicy::Enforce,
+            attest: false,
         }
     }
 }
@@ -399,7 +403,7 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
         canonical::manifest_sha256(url.as_str(), options.nonce.as_deref(), &result_hash);
     let egress = egress::build(fetched.egress_ip, fetched.fetched_at, &request_hash)?;
 
-    Ok(ScrapeProof {
+    let mut proof = ScrapeProof {
         version: SCRAPE_PROOF_VERSION,
         task_id: options.task_id.clone(),
         nonce: options.nonce.clone(),
@@ -438,7 +442,23 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
         egress,
         attestation: Attestation::default(),
         sdk_signature: SdkSignature::default(),
-    })
+    };
+    if options.attest {
+        let report_data = canonical::attestation_report_data(&proof);
+        let quote = attestation::get_quote(&report_data).map_err(|error| {
+            Error::Attestation(format!("guest-agent quote request failed: {error}"))
+        })?;
+        let measurement = attestation::quote_measurement(&quote.quote).map_err(|error| {
+            Error::Attestation(format!("guest-agent quote is malformed: {error}"))
+        })?;
+        proof.attestation = Attestation {
+            tee_type: Some("tdx".to_string()),
+            quote: Some(quote.quote),
+            measurement: Some(serde_json::to_value(measurement).expect("measurement serializes")),
+            report_data: Some(quote.report_data),
+        };
+    }
+    Ok(proof)
 }
 
 fn materialize_robots_policy_hops(

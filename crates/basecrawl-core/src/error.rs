@@ -77,6 +77,9 @@ pub enum Error {
     #[error("could not produce egress metadata: {0}")]
     EgressMetadata(String),
 
+    #[error("TDX attestation failed: {0}")]
+    Attestation(String),
+
     #[error("failed to write output file: {0}")]
     Io(String),
 }
@@ -107,6 +110,7 @@ impl Error {
             Error::ResourceBudgetExceeded => "resource_budget_exceeded",
             Error::DocumentExtraction(_) => "document_extraction",
             Error::EgressMetadata(_) => "egress_metadata_error",
+            Error::Attestation(_) => "attestation_error",
             Error::Io(_) => "io_error",
         }
     }

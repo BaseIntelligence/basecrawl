@@ -58,6 +58,7 @@ struct BindingOptions {
     max_pages: Option<usize>,
     #[serde(alias = "robots_policy")]
     robots_policy: Option<String>,
+    attest: Option<bool>,
 }
 
 /// Error returned to bindings as the same structured JSON shape as core errors.
@@ -177,6 +178,9 @@ fn parse_options(options_json: Option<&str>) -> Result<ScrapeOptions, BindingErr
         options.robots_policy = RobotsPolicy::from_str(&robots_policy).map_err(|error| {
             BindingError::invalid_options(format!("invalid robots_policy: {error}"))
         })?;
+    }
+    if let Some(attest) = binding_options.attest {
+        options.attest = attest;
     }
 
     Ok(options)

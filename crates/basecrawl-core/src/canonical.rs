@@ -8,9 +8,9 @@
 //! reconciliation digests that bind the M1 ScrapeProof surface without including volatile egress
 //! values.
 
-use basecrawl_proof::{CompletenessManifest, FormatCompleteness};
+use basecrawl_proof::{CompletenessManifest, FormatCompleteness, ScrapeProof};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 use std::collections::BTreeMap;
 
 /// Result formats that contribute to the deterministic quorum surface, in canonical order.
@@ -19,6 +19,41 @@ pub const DETERMINISTIC_FORMATS: &[&str] = &["markdown", "html", "rawHtml", "lin
 
 /// Schema version emitted in [`CompletenessManifest`].
 pub const COMPLETENESS_MANIFEST_VERSION: u32 = 1;
+
+/// Domain separation for the ScrapeProof hardware-attestation binding.
+pub const ATTESTATION_DOMAIN_TAG: &[u8] = b"basecrawl/scrape-proof-report-data/v1\0";
+
+/// Assemble the full-width SHA-512 report-data binding for a proof.
+///
+/// Components are NUL-delimited in the architecture-defined order.  Empty optional fields are
+/// represented by an empty component, preserving positional binding rather than silently dropping
+/// a field.  The enclave public key is not available until the M2 signing-key feature populates
+/// it, so attestation callers must not claim a signed SDK identity until then.
+pub fn attestation_report_data(proof: &ScrapeProof) -> String {
+    let components = [
+        proof.task_id.as_deref().unwrap_or_default(),
+        proof.nonce.as_deref().unwrap_or_default(),
+        proof.request.request_hash.as_deref().unwrap_or_default(),
+        proof.tls.cert_chain_hash.as_deref().unwrap_or_default(),
+        proof
+            .tls
+            .handshake_transcript_hash
+            .as_deref()
+            .unwrap_or_default(),
+        proof.response.body_hash.as_deref().unwrap_or_default(),
+        proof.result.result_hash.as_deref().unwrap_or_default(),
+        proof.egress.egress_ip.as_deref().unwrap_or_default(),
+        proof.egress.timestamp.as_deref().unwrap_or_default(),
+        proof.egress.fingerprint_seed.as_deref().unwrap_or_default(),
+    ];
+    let mut hasher = Sha512::new();
+    hasher.update(ATTESTATION_DOMAIN_TAG);
+    for component in components {
+        hasher.update(component.as_bytes());
+        hasher.update([0]);
+    }
+    hex(&hasher.finalize())
+}
 
 /// Serialize a JSON value into its compact canonical representation.
 ///

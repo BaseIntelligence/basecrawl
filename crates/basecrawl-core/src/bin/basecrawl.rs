@@ -148,6 +148,11 @@ struct Cli {
     /// metadata, never request headers, cookies, or request/response bodies.
     #[arg(long, default_value_t = false)]
     verbose: bool,
+
+    /// Request a signed Intel TDX quote from /var/run/dstack.sock and populate attestation fields.
+    /// Outside a CVM this fails closed with no fabricated proof.
+    #[arg(long, default_value_t = false)]
+    attest: bool,
 }
 
 fn run(cli: Cli) -> Result<String, Error> {
@@ -239,6 +244,7 @@ fn run(cli: Cli) -> Result<String, Error> {
         follow_pagination: cli.follow_pagination,
         max_pages: cli.max_pages,
         robots_policy: cli.robots,
+        attest: cli.attest,
     };
 
     let proof = scrape(&raw_url, &options)?;

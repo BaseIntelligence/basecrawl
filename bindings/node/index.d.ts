@@ -26,6 +26,7 @@ export interface ScrapeOptions {
   max_pages?: number;
   robotsPolicy?: "enforce" | "observe" | "ignore";
   robots_policy?: "enforce" | "observe" | "ignore";
+  attest?: boolean;
 }
 
 export interface ScrapeProof {
