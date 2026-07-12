@@ -281,7 +281,18 @@ fn denied_path_is_blocked_with_an_observable_policy_error() {
     assert_eq!(error["error"]["kind"], "robots_denied");
     assert_eq!(error["error"]["robots"]["policy"], "enforce");
     assert_eq!(error["error"]["robots"]["disposition"], "denied");
-    assert_eq!(error["error"]["robots"]["matched_rule"]["path"], "/blocked");
+    // Host-visible error path (VAL-CONF-018/031): path/query are content-blind digests only.
+    let path = error["error"]["robots"]["matched_rule"]["path"]
+        .as_str()
+        .expect("matched_rule.path present");
+    assert!(
+        path.starts_with("url:sha256:"),
+        "host-visible robots path must be a host-safe digest, got {path}"
+    );
+    assert!(!path.contains("/blocked"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("/blocked/private"));
+    assert!(!stderr.contains("robots-denied=1"));
     assert!(
         !server
             .requests
@@ -332,10 +343,18 @@ fn enforce_blocks_a_denied_direct_redirect_target_before_fetch() {
         serde_json::from_slice(&output.stderr).expect("stderr must expose structured policy JSON");
     assert_eq!(error["error"]["kind"], "robots_denied");
     assert_eq!(error["error"]["robots"]["disposition"], "denied");
-    assert_eq!(
-        error["error"]["robots"]["targetUrl"],
-        format!("{}/blocked/private?redirect-target=1", server.base)
+    // Host-visible error: targetUrl is a scheme://host/<url:sha256:…> stand-in (VAL-CONF-018/031).
+    let target = error["error"]["robots"]["targetUrl"]
+        .as_str()
+        .expect("targetUrl present");
+    assert!(
+        target.contains("url:sha256:"),
+        "host-visible robots targetUrl must be redacted, got {target}"
     );
+    assert!(!target.contains("/blocked"));
+    assert!(!target.contains("redirect-target=1"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("/blocked/private?redirect-target=1"));
     assert!(
         !server
             .requests
@@ -406,10 +425,17 @@ fn enforce_blocks_a_denied_browser_redirect_target_before_fetch() {
         serde_json::from_slice(&output.stderr).expect("stderr must expose structured policy JSON");
     assert_eq!(error["error"]["kind"], "robots_denied");
     assert_eq!(error["error"]["robots"]["disposition"], "denied");
-    assert_eq!(
-        error["error"]["robots"]["targetUrl"],
-        format!("{}/blocked/private?browser-server-target=1", server.base)
+    let target = error["error"]["robots"]["targetUrl"]
+        .as_str()
+        .expect("targetUrl present");
+    assert!(
+        target.contains("url:sha256:"),
+        "host-visible robots targetUrl must be redacted, got {target}"
     );
+    assert!(!target.contains("/blocked"));
+    assert!(!target.contains("browser-server-target=1"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("/blocked/private?browser-server-target=1"));
     assert!(
         !server
             .requests
@@ -437,10 +463,17 @@ fn enforce_blocks_a_denied_browser_client_navigation_before_fetch() {
         serde_json::from_slice(&output.stderr).expect("stderr must expose structured policy JSON");
     assert_eq!(error["error"]["kind"], "robots_denied");
     assert_eq!(error["error"]["robots"]["disposition"], "denied");
-    assert_eq!(
-        error["error"]["robots"]["targetUrl"],
-        format!("{}/blocked/private?browser-client-target=1", server.base)
+    let target = error["error"]["robots"]["targetUrl"]
+        .as_str()
+        .expect("targetUrl present");
+    assert!(
+        target.contains("url:sha256:"),
+        "host-visible robots targetUrl must be redacted, got {target}"
     );
+    assert!(!target.contains("/blocked"));
+    assert!(!target.contains("browser-client-target=1"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("/blocked/private?browser-client-target=1"));
     assert!(
         !server
             .requests

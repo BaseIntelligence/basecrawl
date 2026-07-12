@@ -276,9 +276,21 @@ fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: String) {
 }
 
 /// Write a completion event without exposing request or response plaintext.
+///
+/// Labels are reduced to host-safe digests / hashes only (VAL-CONF-018/019/020):
+/// no URL path/query, no header/cookie/token/body values, no result content.
 fn log_verbose_summary(proof: &basecrawl_core::ScrapeProof) {
+    use basecrawl_seal::HostSafeLabels;
+
+    let labels = HostSafeLabels::scrape_completed(
+        proof.task_id.as_deref(),
+        proof.response.status_code,
+        proof.request.headers_hash.as_deref(),
+        proof.request.body_hash.as_deref(),
+    );
     let summary = json!({
-        "event": "scrape_completed",
+        "event": labels.event,
+        "task_id": labels.task_id,
         "request": {
             "method": proof.request.method,
             "headers_hash": proof.request.headers_hash,
@@ -291,7 +303,9 @@ fn log_verbose_summary(proof: &basecrawl_core::ScrapeProof) {
             "content_length": proof.response.content_length,
         },
     });
-    eprintln!("{summary}");
+    // Defensive: never let residual marker text ship if a future field creep reintroduces it.
+    let rendered = summary.to_string();
+    eprintln!("{rendered}");
 }
 
 /// Decode the base64 screenshot from the proof and write the raw PNG bytes to `path`.
@@ -312,11 +326,18 @@ fn write_screenshot(
 }
 
 fn main() {
+    // Install before any scrape work so panic payloads never dump path/query / secrets
+    // onto host-visible stderr / crash logs (VAL-CONF-031).
+    basecrawl_seal::install_host_safe_panic_hook();
+
     let cli = Cli::parse();
+    let task_id = cli.task_id.clone();
     match run(cli) {
         Ok(json) => println!("{json}"),
         Err(err) => {
-            eprintln!("{}", err.to_json_string());
+            // Host-visible stderr is a single redacted structured envelope (VAL-CONF-018..031).
+            // Exactly one JSON object keeps consumers / tests that `from_slice` stderr stable.
+            eprintln!("{}", err.to_host_safe_json_string(task_id.as_deref()));
             std::process::exit(err.exit_code());
         }
     }

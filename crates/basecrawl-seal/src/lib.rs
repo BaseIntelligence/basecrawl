@@ -15,7 +15,11 @@
 //! * **result sealing to the validator committee threshold public key** —
 //!   the ScrapeProof result body is sealed to the committee, never to the
 //!   miner, so the host-visible sealed-result payload stays opaque ciphertext
-//!   (VAL-CONF-015, VAL-CONF-017).
+//!   (VAL-CONF-015, VAL-CONF-017);
+//! * **host-visible log / metric redaction** — every host-facing log line,
+//!   structured error on stderr, metric label, stack trace, and panic payload
+//!   is reduced to host-safe kinds + digests so path/query, headers/cookies/
+//!   tokens/body, and result plaintext never escape (VAL-CONF-018/019/020/031).
 //!
 //! Assertions satisfied by this crate for M3:
 //! * **VAL-CONF-011** — without a released / enclave-held key the sealed task
@@ -28,8 +32,16 @@
 //!   public key; miner/host-held keys recover no result plaintext.
 //! * **VAL-CONF-017** — host-visible sealed result is opaque ciphertext; result
 //!   content markers never appear in the host-relayed envelope.
+//! * **VAL-CONF-018** — host-visible logs / metric labels never carry a target
+//!   URL path or query string; only redacted task IDs / hashes appear.
+//! * **VAL-CONF-019** — request header / cookie / auth token / body markers
+//!   never appear in host-visible logs or metric labels.
+//! * **VAL-CONF-020** — result canary strings never leak into host-visible
+//!   logs or metrics (results stay sealed, logs are redacted).
 //! * **VAL-CONF-027** — bit-flip or truncation of the sealed-task ciphertext
 //!   fails authenticated decryption; no partial plaintext is emitted or acted on.
+//! * **VAL-CONF-031** — error / exception / panic paths are redacted to the
+//!   same host-safe standard as the happy path.
 
 #![forbid(unsafe_code)]
 
@@ -37,6 +49,7 @@ pub mod dns;
 pub mod error;
 pub mod identity;
 pub mod keyrelease;
+pub mod redact;
 pub mod result;
 pub mod task;
 
@@ -54,6 +67,11 @@ pub use keyrelease::{
     to_report_data_field, HttpKeyReleaseTransport, KeyReleaseClient, KeyReleaseTransport,
     QuoteBundle, QuoteProvider, ReleasedTaskKey, DEFAULT_KEY_RELEASE_TIMEOUT, KEY_RELEASE_TAG,
     RA_TLS_PEER_HEADER, REPORT_DATA_LEN,
+};
+pub use redact::{
+    host_safe_digest, host_safe_panic_message, install_host_safe_panic_hook, redact_json_value,
+    redact_markers, task_id_ref, url_path_query_ref, url_ref, HostSafeLabels,
+    HOST_SAFE_DIGEST_PREFIX, REDACTED_TOKEN,
 };
 pub use result::{
     build_result_aad, decrypt_result_as_miner_host, decrypt_result_with_foreign_key,

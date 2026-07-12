@@ -38,6 +38,10 @@ use url::Url;
 pub use basecrawl_proof::ScrapeProof;
 pub use basecrawl_render::{Action, ScrollDirection};
 pub use error::Error;
+// Host-safe panic / label helpers for bindings and CLI (VAL-CONF-018..031).
+pub use basecrawl_seal::{
+    host_safe_panic_message, install_host_safe_panic_hook, task_id_ref, HostSafeLabels,
+};
 pub use format::Format;
 pub use robots::RobotsPolicy;
 

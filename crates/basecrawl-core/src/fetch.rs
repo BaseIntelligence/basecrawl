@@ -340,9 +340,10 @@ where
                     });
                 }
                 let target = current.join(&location).map_err(|_| {
-                    Error::Redirect(format!(
-                        "could not resolve redirect Location '{location}' against {current}"
-                    ))
+                    // Host-safe: never embed the Location path/query or the current URL.
+                    Error::Redirect(
+                        "could not resolve redirect Location against the current URL".to_string(),
+                    )
                 })?;
                 redirects.push(RedirectHop {
                     status_code: response.status_code,
@@ -442,7 +443,9 @@ fn fetch_https(
         .ok_or_else(|| Error::InvalidUrl(url.to_string()))?;
     let port = url.port_or_known_default().unwrap_or(443);
     let server_name = ServerName::try_from(host.to_string())
-        .map_err(|_| Error::InvalidUrl(format!("invalid HTTPS host '{host}'")))?;
+        // Host-safe: never embed the requested hostname string in an error path that
+        // reaches host-visible stderr (VAL-CONF-018 / 031). Surface a generic invalid-URL.
+        .map_err(|_| Error::InvalidUrl(url.to_string()))?;
     let address = resolve_address(host, port, deadline)?;
     let tcp = TcpStream::connect_timeout(&address, remaining(deadline)?).map_err(classify_io)?;
     let egress_ip = tcp.local_addr().map_err(classify_io)?.ip();

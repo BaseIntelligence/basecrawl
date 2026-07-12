@@ -235,15 +235,8 @@ pub unsafe extern "C" fn basecrawl_scrape_json(
             ptr::null_mut()
         }
         Err(_) => {
-            set_last_error(
-                &json!({
-                    "error": {
-                        "kind": "internal_error",
-                        "message": "basecrawl binding panicked",
-                    }
-                })
-                .to_string(),
-            );
+            // Host-safe panic surface: never forward the raw panic payload (VAL-CONF-031).
+            set_last_error(basecrawl_core::host_safe_panic_message().as_str());
             ptr::null_mut()
         }
     }
