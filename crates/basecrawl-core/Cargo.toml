@@ -17,6 +17,7 @@ path = "src/bin/basecrawl.rs"
 [dependencies]
 basecrawl-proof = { path = "../basecrawl-proof" }
 basecrawl-render = { path = "../basecrawl-render" }
+basecrawl-seal = { path = "../basecrawl-seal" }
 serde.workspace = true
 serde_json.workspace = true
 clap.workspace = true

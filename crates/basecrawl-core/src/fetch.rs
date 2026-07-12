@@ -10,6 +10,7 @@ use crate::error::Error;
 use base64::Engine;
 use basecrawl_proof::{CertificateValidation, RedirectHop, Tls};
 use basecrawl_render::{OriginPacer, PacingDeadlineExceeded};
+use basecrawl_seal::{resolve_for_connect, NameResolver, PinnedResolver};
 use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::{ClientConnection, Resumption, WebPkiServerVerifier};
@@ -18,10 +19,8 @@ use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::io::{self, Cursor, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, TcpStream, ToSocketAddrs};
-use std::sync::mpsc;
+use std::net::{IpAddr, Ipv4Addr, TcpStream};
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 use url::Url;
@@ -501,27 +500,35 @@ fn fetch_https(
     })
 }
 
+/// Resolve `host:port` for origin connect using the in-enclave DoH/DoT pin.
+///
+/// Confidentiality (VAL-CONF-013): target hostnames are never handed to the
+/// host's cleartext stub resolver. Literals and `localhost` short-circuit; all
+/// other names go through [`PinnedResolver`] (DoH by default). Failures do
+/// **not** fall back to port 53 — that would re-introduce cleartext QNAMEs.
 fn resolve_address(
     host: &str,
     port: u16,
     deadline: Instant,
 ) -> Result<std::net::SocketAddr, Error> {
-    let host = host.to_string();
-    let (sender, receiver) = mpsc::sync_channel(1);
-    thread::spawn(move || {
-        let result = (host.as_str(), port)
-            .to_socket_addrs()
-            .map_err(classify_io)
-            .and_then(|mut addresses| {
-                addresses.next().ok_or_else(|| {
-                    Error::Transport(format!("DNS resolution returned no addresses for {host}"))
-                })
-            });
-        let _ = sender.send(result);
-    });
-    receiver
-        .recv_timeout(remaining(deadline)?)
-        .map_err(|_| deadline_elapsed())?
+    resolve_address_with(host, port, deadline, &PinnedResolver::doh())
+}
+
+/// Injectible variant used by focused confidentiality tests.
+pub(crate) fn resolve_address_with(
+    host: &str,
+    port: u16,
+    deadline: Instant,
+    resolver: &dyn NameResolver,
+) -> Result<std::net::SocketAddr, Error> {
+    resolve_for_connect(host, port, resolver, deadline).map_err(|error| match error {
+        basecrawl_seal::SealError::Dns { detail } => {
+            // Keep the kind transport_error for backward-compatible error JSON
+            // while making the cause obviously a pinned-DNS failure in message.
+            Error::Transport(format!("pinned DoH/DoT resolution failed: {detail}"))
+        }
+        other => Error::Transport(format!("pinned DoH/DoT resolution failed: {other}")),
+    })
 }
 
 /// Build a rustls configuration with Mozilla roots. TLS 1.2 remains enabled only so the default

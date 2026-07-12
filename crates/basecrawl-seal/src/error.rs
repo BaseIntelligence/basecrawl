@@ -51,6 +51,15 @@ pub enum SealError {
     /// I/O or JSON transport failure boundary (no secret leakage).
     #[error("transport error: {detail}")]
     Transport { detail: String },
+
+    /// In-enclave DoH/DoT resolution failed (no cleartext port-53 fallback).
+    ///
+    /// `detail` is host-safe: never contains the QNAME (target hostname) as raw
+    /// text beyond coarse status codes, so host logs of this path stay free of
+    /// scrape-target content. The variant is separate so VAL-CONF-013 tests can
+    /// assert "pinned DNS failed closed" without system-resolver fallback.
+    #[error("pinned DNS resolution failed: {detail}")]
+    Dns { detail: String },
 }
 
 impl SealError {
@@ -68,6 +77,7 @@ impl SealError {
             Self::InvalidIdentity { .. } => "invalid_identity",
             Self::QuoteFailed { .. } => "quote_failed",
             Self::Transport { .. } => "transport",
+            Self::Dns { .. } => "dns",
         }
     }
 
