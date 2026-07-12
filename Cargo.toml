@@ -8,6 +8,7 @@ members = [
     "crates/basecrawl-ffi",
     "crates/basecrawl-proof",
     "crates/basecrawl-render",
+    "crates/basecrawl-seal",
 ]
 
 [workspace.package]
@@ -30,7 +31,9 @@ brotli = "8.0"
 x509-parser = "0.18"
 sha2 = "0.10"
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+crypto_box = { version = "0.9.1", default-features = false, features = ["std", "seal", "salsa20", "getrandom"] }
 thiserror = "2"
+zeroize = { version = "1", features = ["derive"] }
 scraper = "0.27"
 ego-tree = "0.11"
 headless_chrome = "1"
