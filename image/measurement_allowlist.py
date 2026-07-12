@@ -76,6 +76,12 @@ EXECUTION_RECORD_ID = "m2-tee-integration/production-reconciliation"
 EXECUTION_ARTIFACT_PREFIX = "evidence/m2/"
 EXECUTION_EVENT_PREFIX = "m2-tee-audit-"
 EXECUTION_OPERATION_PREFIX = "m2-tee-integration/"
+EXECUTION_VALIDATION_KINDS = (
+    "dcap-qvl verify",
+    "dcap-qvl decode",
+    "direct RTMR3 replay",
+    "reproducibility validation",
+)
 DEPLOYMENT_FIELDS = frozenset(
     {
         "app_id",
@@ -1067,6 +1073,7 @@ def _validate_execution_record(
         (None, "final_inventory", "ownership_clean"),
         (None, "reconciliation", "passed"),
     )
+    deployment_validation_index = {"first": 0, "second": 0}
     for index, (event, expected) in enumerate(zip(events, expected_stages)):
         if not isinstance(event, Mapping):
             raise MeasurementAllowlistError(
@@ -1099,19 +1106,27 @@ def _validate_execution_record(
             raise MeasurementAllowlistError(
                 f"execution record event {index} fields are incomplete"
             )
+        operation_scope = deployment_name or "mission"
+        sequence = index + 1
+        expected_operation_id = (
+            f"{EXECUTION_OPERATION_PREFIX}{operation_scope}/{stage}/{sequence:04d}"
+        )
         if (
-            event.get("event_id") != f"{EXECUTION_EVENT_PREFIX}{index + 1:04d}"
-            or event.get("sequence") != index + 1
+            event.get("event_id") != f"{EXECUTION_EVENT_PREFIX}{sequence:04d}"
+            or type(event.get("sequence")) is not int
+            or event.get("sequence") != sequence
             or event.get("deployment") != deployment_name
             or event.get("stage") != stage
             or event.get("status") != status
             or event.get("immutable") is not True
-            or not isinstance(event.get("operation_id"), str)
-            or not event["operation_id"].startswith(EXECUTION_OPERATION_PREFIX)
             or not isinstance(event.get("identities"), Mapping)
         ):
             raise MeasurementAllowlistError(
                 "immutable redacted execution record event order or identity drift"
+            )
+        if event.get("operation_id") != expected_operation_id:
+            raise MeasurementAllowlistError(
+                "immutable redacted execution record operation ID drift"
             )
         _validate_execution_artifacts(
             event.get("artifacts"),
@@ -1146,12 +1161,13 @@ def _validate_execution_record(
                 manifest_files=manifest_files,
             )
         elif stage == "validation":
+            validation_index = deployment_validation_index[deployment_name]
             _validate_validation_event(
                 event,
                 deployment_name=deployment_name,
-                deployment=deployment_by_name[deployment_name],
-                manifest_files=manifest_files,
+                expected_kind=EXECUTION_VALIDATION_KINDS[validation_index],
             )
+            deployment_validation_index[deployment_name] = validation_index + 1
         elif stage == "deletion":
             _validate_deletion_event(
                 event,
@@ -1308,57 +1324,72 @@ def _validate_validation_event(
     event: Mapping[str, Any],
     *,
     deployment_name: str,
-    deployment: Mapping[str, Any],
-    manifest_files: Mapping[str, str],
+    expected_kind: str,
 ) -> None:
     validation = event.get("validation")
     if (
         not isinstance(validation, Mapping)
-        or set(validation) != {"command", "exit_code", "result", "status"}
-        or not isinstance(validation.get("command"), str)
-        or not validation["command"]
+        or set(validation) != {"command", "exit_code", "kind", "result", "status"}
         or validation.get("exit_code") != 0
         or validation.get("status") != "passed"
         or not isinstance(validation.get("result"), Mapping)
     ):
         raise MeasurementAllowlistError("execution record validation result drift")
-    command = validation["command"]
-    if "dcap-qvl verify" in command:
-        expected_result = {"advisories": 0, "status": "UpToDate"}
-        required_suffix = "/quote.hex"
-    elif "dcap-qvl decode" in command:
-        expected_result = {"measurement": "allowlisted", "status": "decoded"}
-        required_suffix = "/quote.hex"
-    elif "replay_rtmr3" in command:
-        expected_result = {
-            "compose_hash": "5f87b1082fdb39e7345db64bb5d5b5b62fff01b0afc624ad4da861ede4361a42",
-            "status": "matched",
-        }
-        required_suffix = "/event-log.json"
-    elif "reproducibility.py validate" in command:
-        expected_result = {"image": "current_digest", "status": "reconciled"}
-        required_suffix = ""
-    else:
+
+    deployment_prefix = f"evidence/m2/deployments/{deployment_name}"
+    canonical_specs = {
+        "dcap-qvl verify": {
+            "command": f"dcap-qvl verify --hex {deployment_prefix}/quote.hex",
+            "result": {"advisories": 0, "status": "UpToDate"},
+            "artifacts": (
+                f"{deployment_prefix}/quote.hex",
+                f"{deployment_prefix}/attestation.json",
+            ),
+        },
+        "dcap-qvl decode": {
+            "command": f"dcap-qvl decode --hex {deployment_prefix}/quote.hex",
+            "result": {"measurement": "allowlisted", "status": "decoded"},
+            "artifacts": (f"{deployment_prefix}/quote.hex",),
+        },
+        "direct RTMR3 replay": {
+            "command": (
+                f"python3 -c replay_rtmr3 {deployment_prefix}/event-log.json"
+            ),
+            "result": {
+                "compose_hash": (
+                    "5f87b1082fdb39e7345db64bb5d5b5b62fff01b0afc624ad4da861ede4361a42"
+                ),
+                "status": "matched",
+            },
+            "artifacts": (f"{deployment_prefix}/event-log.json",),
+        },
+        "reproducibility validation": {
+            "command": "python3 image/reproducibility.py validate",
+            "result": {"image": "current_digest", "status": "reconciled"},
+            "artifacts": ("evidence/m2/measurement/dstack-mr-output.json",),
+        },
+    }
+    if (
+        expected_kind not in canonical_specs
+        or validation.get("kind") != expected_kind
+    ):
         raise MeasurementAllowlistError(
-            "execution record validation command is unknown"
+            "execution record validation kind or order drift"
         )
-    if dict(validation["result"]) != expected_result:
+    expected = canonical_specs[expected_kind]
+    if validation.get("command") != expected["command"]:
+        raise MeasurementAllowlistError("execution record validation command drift")
+    if dict(validation["result"]) != expected["result"]:
         raise MeasurementAllowlistError("execution record validation result drift")
-    if required_suffix and not any(
-        isinstance(artifact, Mapping)
-        and artifact.get("path", "").endswith(f"{deployment_name}{required_suffix}")
+    actual_artifacts = tuple(
+        artifact["path"]
         for artifact in event["artifacts"]
-    ):
-        raise MeasurementAllowlistError("execution record validation artifact drift")
-    if not required_suffix and not any(
-        isinstance(artifact, Mapping)
-        and artifact.get("path") == "evidence/m2/measurement/dstack-mr-output.json"
-        for artifact in event["artifacts"]
-    ):
+        if isinstance(artifact, Mapping) and isinstance(artifact.get("path"), str)
+    )
+    if actual_artifacts != expected["artifacts"]:
         raise MeasurementAllowlistError(
-            "execution record reconciliation artifact drift"
+            "execution record validation artifacts drift"
         )
-    del manifest_files
 
 
 def _validate_deletion_event(

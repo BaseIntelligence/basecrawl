@@ -247,6 +247,7 @@
       "validation": {
         "command": "dcap-qvl verify --hex evidence/m2/deployments/first/quote.hex",
         "exit_code": 0,
+        "kind": "dcap-qvl verify",
         "result": {
           "advisories": 0,
           "status": "UpToDate"
@@ -277,6 +278,7 @@
       "validation": {
         "command": "dcap-qvl decode --hex evidence/m2/deployments/first/quote.hex",
         "exit_code": 0,
+        "kind": "dcap-qvl decode",
         "result": {
           "measurement": "allowlisted",
           "status": "decoded"
@@ -307,6 +309,7 @@
       "validation": {
         "command": "python3 -c replay_rtmr3 evidence/m2/deployments/first/event-log.json",
         "exit_code": 0,
+        "kind": "direct RTMR3 replay",
         "result": {
           "compose_hash": "5f87b1082fdb39e7345db64bb5d5b5b62fff01b0afc624ad4da861ede4361a42",
           "status": "matched"
@@ -337,6 +340,7 @@
       "validation": {
         "command": "python3 image/reproducibility.py validate",
         "exit_code": 0,
+        "kind": "reproducibility validation",
         "result": {
           "image": "current_digest",
           "status": "reconciled"
@@ -512,6 +516,7 @@
       "validation": {
         "command": "dcap-qvl verify --hex evidence/m2/deployments/second/quote.hex",
         "exit_code": 0,
+        "kind": "dcap-qvl verify",
         "result": {
           "advisories": 0,
           "status": "UpToDate"
@@ -542,6 +547,7 @@
       "validation": {
         "command": "dcap-qvl decode --hex evidence/m2/deployments/second/quote.hex",
         "exit_code": 0,
+        "kind": "dcap-qvl decode",
         "result": {
           "measurement": "allowlisted",
           "status": "decoded"
@@ -572,6 +578,7 @@
       "validation": {
         "command": "python3 -c replay_rtmr3 evidence/m2/deployments/second/event-log.json",
         "exit_code": 0,
+        "kind": "direct RTMR3 replay",
         "result": {
           "compose_hash": "5f87b1082fdb39e7345db64bb5d5b5b62fff01b0afc624ad4da861ede4361a42",
           "status": "matched"
@@ -602,6 +609,7 @@
       "validation": {
         "command": "python3 image/reproducibility.py validate",
         "exit_code": 0,
+        "kind": "reproducibility validation",
         "result": {
           "image": "current_digest",
           "status": "reconciled"

@@ -23,6 +23,35 @@ RECONCILIATION_PATH = IMAGE_DIR / "measurement-reconciliation.json"
 
 
 class MeasurementAllowlistTests(unittest.TestCase):
+    def assert_execution_mutation_rejected(
+        self,
+        mutate: object,
+        *,
+        pattern: str = "execution record",
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shutil.copytree(IMAGE_DIR / "evidence", root / "evidence")
+            record = json.loads(RECONCILIATION_PATH.read_text())
+            execution_path = root / record["evidence_bundle"]["execution_record_path"]
+            execution = json.loads(execution_path.read_text())
+            mutate(execution)  # type: ignore[operator]
+            execution_path.write_text(json.dumps(execution))
+            measurements.write_evidence_manifest(
+                root / record["evidence_bundle"]["manifest_path"]
+            )
+            path = root / "measurement-reconciliation.json"
+            path.write_text(json.dumps(record))
+            with self.assertRaisesRegex(
+                measurements.MeasurementAllowlistError,
+                pattern,
+            ):
+                measurements.validate_reconciliation(
+                    path,
+                    allowlist_path=ALLOWLIST_PATH,
+                    app_compose_path=APP_COMPOSE_PATH,
+                )
+
     def test_allowlist_is_the_exact_six_field_live_tuple(self) -> None:
         entries = measurements.load_allowlist(ALLOWLIST_PATH)
         self.assertEqual(len(entries), 1)
@@ -475,7 +504,14 @@ class MeasurementAllowlistTests(unittest.TestCase):
             [f"m2-tee-audit-{index:04d}" for index in range(1, 19)],
         )
         for event in execution["events"]:
-            self.assertTrue(event["operation_id"].startswith("m2-tee-integration/"))
+            operation_scope = event["deployment"] or "mission"
+            self.assertEqual(
+                event["operation_id"],
+                (
+                    f"m2-tee-integration/{operation_scope}/{event['stage']}/"
+                    f"{event['sequence']:04d}"
+                ),
+            )
             for artifact in event["artifacts"]:
                 self.assertRegex(artifact["path"], r"^evidence/m2/")
                 self.assertRegex(artifact["sha256"], r"^[0-9a-f]{64}$")
@@ -484,6 +520,97 @@ class MeasurementAllowlistTests(unittest.TestCase):
                 self.assertEqual(result["exit_code"], 0)
                 self.assertEqual(result["status"], "passed")
                 self.assertTrue(result["command"])
+        for deployment in ("first", "second"):
+            self.assertEqual(
+                [
+                    event["validation"]["kind"]
+                    for event in execution["events"]
+                    if event["deployment"] == deployment
+                    and event["stage"] == "validation"
+                ],
+                [
+                    "dcap-qvl verify",
+                    "dcap-qvl decode",
+                    "direct RTMR3 replay",
+                    "reproducibility validation",
+                ],
+            )
+
+    def test_execution_record_validation_sequence_is_exact_after_manifest_rewrite(
+        self,
+    ) -> None:
+        def duplicate(execution: dict[str, object]) -> None:
+            events = execution["events"]
+            events[4]["validation"] = copy.deepcopy(events[3]["validation"])
+
+        def reorder(execution: dict[str, object]) -> None:
+            events = execution["events"]
+            events[3]["validation"], events[4]["validation"] = (
+                events[4]["validation"],
+                events[3]["validation"],
+            )
+
+        def substitute(execution: dict[str, object]) -> None:
+            execution["events"][5]["validation"]["kind"] = "summary RTMR3 check"
+
+        for name, mutate in (
+            ("duplicate", duplicate),
+            ("reorder", reorder),
+            ("substitute", substitute),
+        ):
+            with self.subTest(name=name):
+                self.assert_execution_mutation_rejected(
+                    mutate,
+                    pattern="validation kind or order",
+                )
+
+    def test_execution_record_operation_id_is_exact_after_manifest_rewrite(
+        self,
+    ) -> None:
+        mutations = (
+            (0, "m2-tee-integration/second/deployment_request/0001"),
+            (4, "m2-tee-integration/first/decode/0005"),
+            (12, "m2-tee-integration/second/validation/0012"),
+            (16, "m2-tee-integration/mission/final_inventory/17"),
+        )
+        for event_index, operation_id in mutations:
+            with self.subTest(event_index=event_index, operation_id=operation_id):
+                self.assert_execution_mutation_rejected(
+                    lambda execution,
+                    event_index=event_index,
+                    operation_id=operation_id: execution["events"][
+                        event_index
+                    ].update(operation_id=operation_id),
+                    pattern="operation ID",
+                )
+
+    def test_execution_record_validation_cross_bindings_are_exact(
+        self,
+    ) -> None:
+        def alter_command(execution: dict[str, object]) -> None:
+            execution["events"][3]["validation"]["command"] += " --quiet"
+
+        def alter_result(execution: dict[str, object]) -> None:
+            execution["events"][4]["validation"]["result"]["status"] = "parsed"
+
+        def substitute_artifact(execution: dict[str, object]) -> None:
+            event = execution["events"][5]
+            replacement = execution["events"][6]["artifacts"][0]
+            event["artifacts"] = [copy.deepcopy(replacement)]
+
+        def add_artifact(execution: dict[str, object]) -> None:
+            event = execution["events"][4]
+            extra = execution["events"][2]["artifacts"][0]
+            event["artifacts"].append(copy.deepcopy(extra))
+
+        for name, mutate, pattern in (
+            ("command", alter_command, "validation command"),
+            ("result", alter_result, "validation result"),
+            ("artifact", substitute_artifact, "validation artifacts"),
+            ("extra_artifact", add_artifact, "validation artifacts"),
+        ):
+            with self.subTest(name=name):
+                self.assert_execution_mutation_rejected(mutate, pattern=pattern)
 
     def test_execution_record_hash_anchor_rejects_tampering_after_manifest_rewrite(
         self,
