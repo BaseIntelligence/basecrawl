@@ -55,6 +55,10 @@ DEPLOYMENT_FIELDS = ("app_id", "cvm_name")
 class ReproducibilityError(RuntimeError):
     """A build definition or independent build/deployment comparison drifted."""
 
+    def __init__(self, message: str, *, code: str = "reproducibility_error") -> None:
+        super().__init__(message)
+        self.code = code
+
 
 @dataclass(frozen=True)
 class DockerfileReport:
@@ -118,7 +122,17 @@ def _normalized_compose(text: str) -> dict[str, Any]:
         check=False,
     )
     if proc.returncode != 0:
-        raise ReproducibilityError(f"invalid Compose definition: {proc.stderr.strip()}")
+        message = proc.stderr.strip()
+        code = (
+            "invalid_compose_volume"
+            if "volumes" in message
+            and ("service volume" in message or "services." in message)
+            else "invalid_compose_definition"
+        )
+        raise ReproducibilityError(
+            f"invalid Compose definition: {message}",
+            code=code,
+        )
     try:
         document = json.loads(proc.stdout)
     except json.JSONDecodeError as error:
@@ -130,6 +144,49 @@ def _normalized_compose(text: str) -> dict[str, Any]:
     return document
 
 
+def _validate_compose_volumes(
+    service_specs: dict[str, Any],
+) -> None:
+    """Require normalized volume data to retain the typed mount contract."""
+
+    for service, spec in service_specs.items():
+        if not isinstance(spec, dict):
+            continue
+        volumes = spec.get("volumes", [])
+        if not isinstance(volumes, list):
+            raise ReproducibilityError(
+                f"services.{service}.volumes must be a list of mount mappings",
+                code="invalid_compose_volume",
+            )
+        for index, volume in enumerate(volumes):
+            if not isinstance(volume, dict):
+                raise ReproducibilityError(
+                    f"services.{service}.volumes[{index}] must be a mount mapping",
+                    code="invalid_compose_volume",
+                )
+            mount_type = volume.get("type")
+            source = volume.get("source")
+            target = volume.get("target")
+            if not isinstance(mount_type, str) or not mount_type.strip():
+                raise ReproducibilityError(
+                    f"services.{service}.volumes[{index}].type must be a non-empty string",
+                    code="invalid_compose_volume",
+                )
+            if not isinstance(target, str) or not target.strip():
+                raise ReproducibilityError(
+                    f"services.{service}.volumes[{index}].target must be a non-empty string",
+                    code="invalid_compose_volume",
+                )
+            if mount_type == "bind" and (
+                not isinstance(source, str) or not source.strip()
+            ):
+                raise ReproducibilityError(
+                    f"services.{service}.volumes[{index}].source must be a non-empty "
+                    "string for bind mounts",
+                    code="invalid_compose_volume",
+                )
+
+
 def validate_compose(text: str) -> ComposeReport:
     """Validate normalized Compose services, image pins, and the socket bind."""
 
@@ -137,6 +194,7 @@ def validate_compose(text: str) -> ComposeReport:
     service_specs = document.get("services")
     if not isinstance(service_specs, dict) or not service_specs:
         raise ReproducibilityError("Compose contains no services")
+    _validate_compose_volumes(service_specs)
 
     services = tuple(sorted(service_specs))
     images = {
@@ -260,10 +318,88 @@ def build_once(*, output: Path, metadata: Path) -> str:
         build_metadata = json.loads(metadata.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ReproducibilityError(f"invalid BuildKit metadata: {error}") from error
-    digest = build_metadata.get("containerimage.digest")
-    if not isinstance(digest, str) or not _BUILD_DIGEST.fullmatch(digest):
+    digest = validate_buildkit_metadata(build_metadata, expected_digest=None, index=0)
+    return digest
+
+
+_BUILDKIT_REF = re.compile(r"^(?:[A-Za-z0-9_.-]+/){2}[A-Za-z0-9_-]{8,}$")
+
+
+def validate_buildkit_metadata(
+    metadata: dict[str, Any],
+    expected_digest: str | None,
+    index: int,
+) -> str:
+    """Validate BuildKit's output digest, reference, invocation, and descriptor identity."""
+
+    digest = metadata.get("containerimage.digest")
+    build_ref = metadata.get("buildx.build.ref")
+    provenance = metadata.get("buildx.build.provenance")
+    descriptor = metadata.get("containerimage.descriptor")
+    if (
+        not isinstance(digest, str)
+        or not _BUILD_DIGEST.fullmatch(digest)
+        or (expected_digest is not None and digest != expected_digest)
+    ):
         raise ReproducibilityError(
-            f"BuildKit returned an invalid image digest: {digest!r}"
+            f"BuildKit metadata[{index}] has an invalid or unexpected output digest: "
+            f"{digest!r}",
+            code="invalid_buildkit_provenance",
+        )
+    if not isinstance(build_ref, str) or not _BUILDKIT_REF.fullmatch(build_ref):
+        raise ReproducibilityError(
+            f"BuildKit metadata[{index}] has an unverifiable build reference: "
+            f"{build_ref!r}",
+            code="invalid_buildkit_provenance",
+        )
+    if not isinstance(provenance, dict):
+        raise ReproducibilityError(
+            f"BuildKit metadata[{index}] has no provenance invocation",
+            code="invalid_buildkit_provenance",
+        )
+    invocation = provenance.get("invocation")
+    parameters = invocation.get("parameters") if isinstance(invocation, dict) else None
+    environment = (
+        invocation.get("environment") if isinstance(invocation, dict) else None
+    )
+    if not isinstance(parameters, dict) or not isinstance(environment, dict):
+        raise ReproducibilityError(
+            f"BuildKit metadata[{index}] has no verifiable invocation identity",
+            code="invalid_buildkit_provenance",
+        )
+    args = parameters.get("args")
+    locals_ = parameters.get("locals")
+    if (
+        not isinstance(args, dict)
+        or not args.get("cmdline")
+        or not args.get("source")
+        or not isinstance(locals_, list)
+        or {item.get("name") for item in locals_ if isinstance(item, dict)}
+        != {"context", "dockerfile"}
+    ):
+        raise ReproducibilityError(
+            f"BuildKit metadata[{index}] invocation is missing source identity",
+            code="invalid_buildkit_provenance",
+        )
+    if environment.get("platform") != "linux/amd64":
+        raise ReproducibilityError(
+            f"BuildKit metadata[{index}] invocation platform is not linux/amd64",
+            code="invalid_buildkit_provenance",
+        )
+    if (
+        not isinstance(descriptor, dict)
+        or descriptor.get("digest") != digest
+        or descriptor.get("mediaType")
+        not in {
+            "application/vnd.oci.image.manifest.v1+json",
+            "application/vnd.docker.distribution.manifest.v2+json",
+        }
+        or not isinstance(descriptor.get("size"), int)
+        or descriptor["size"] <= 0
+    ):
+        raise ReproducibilityError(
+            f"BuildKit metadata[{index}] output descriptor is not bound to the digest",
+            code="invalid_buildkit_provenance",
         )
     return digest
 
@@ -371,15 +507,8 @@ def _require_live_provenance(entry: dict[str, Any], index: int) -> str:
         paths[field] = path
 
     metadata = _load_json(paths["build_metadata_path"], "BuildKit metadata")
-    if metadata.get("containerimage.digest") != entry["build_digest"]:
-        raise ReproducibilityError(
-            f"evidence[{index}] build_digest does not match BuildKit metadata"
-        )
-    build_ref = metadata.get("buildx.build.ref")
-    if not isinstance(build_ref, str) or not build_ref:
-        raise ReproducibilityError(
-            f"evidence[{index}] BuildKit metadata has no independent build reference"
-        )
+    validate_buildkit_metadata(metadata, entry["build_digest"], index)
+    build_ref = metadata["buildx.build.ref"]
     registry = subprocess.run(
         ["docker", "buildx", "imagetools", "inspect", "--raw", entry["image_ref"]],
         capture_output=True,
@@ -617,7 +746,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "baseline": assert_reproducible_evidence(evidence),
             }
     except ReproducibilityError as error:
-        print(json.dumps({"reproducible": False, "error": str(error)}, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "code": error.code,
+                    "error": str(error),
+                    "reproducible": False,
+                },
+                sort_keys=True,
+            )
+        )
         return 1
     print(json.dumps(result, sort_keys=True))
     return 0

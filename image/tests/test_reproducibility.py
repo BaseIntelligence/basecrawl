@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import copy
+import json
 import re
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 # ruff: noqa: E402
@@ -96,6 +98,48 @@ services:
 """
         self.assertFalse(repro.validate_compose(text).mounts_dstack_socket)
 
+    def test_malformed_volume_containers_fail_with_structured_errors(self) -> None:
+        for value in (None, "not-a-list", {"source": "/x"}):
+            with self.subTest(value=value):
+                document = {
+                    "services": {
+                        "basecrawl": {
+                            "image": IMAGE_REF,
+                            "volumes": value,
+                        }
+                    }
+                }
+                with mock.patch.object(
+                    repro, "_normalized_compose", return_value=document
+                ):
+                    with self.assertRaisesRegex(
+                        repro.ReproducibilityError,
+                        r"services\.basecrawl\.volumes",
+                    ) as raised:
+                        repro.validate_compose("ignored")
+                self.assertEqual(raised.exception.code, "invalid_compose_volume")
+
+    def test_malformed_volume_entries_fail_with_structured_errors(self) -> None:
+        for value in (None, "not-a-mapping", {"type": "bind", "source": "/x"}):
+            with self.subTest(value=value):
+                document = {
+                    "services": {
+                        "basecrawl": {
+                            "image": IMAGE_REF,
+                            "volumes": [value],
+                        }
+                    }
+                }
+                with mock.patch.object(
+                    repro, "_normalized_compose", return_value=document
+                ):
+                    with self.assertRaisesRegex(
+                        repro.ReproducibilityError,
+                        r"services\.basecrawl\.volumes\[0\]",
+                    ) as raised:
+                        repro.validate_compose("ignored")
+                self.assertEqual(raised.exception.code, "invalid_compose_volume")
+
     def test_build_command_normalizes_reproducibility_inputs(self) -> None:
         command = repro.build_command(
             output=Path("/tmp/basecrawl-image.tar"),
@@ -110,6 +154,32 @@ services:
             "type=oci,dest=/tmp/basecrawl-image.tar,rewrite-timestamp=true", joined
         )
         self.assertIn("--platform linux/amd64", joined)
+
+    def test_buildkit_metadata_requires_verifiable_invocation_and_output_identity(
+        self,
+    ) -> None:
+        metadata = json.loads(
+            (IMAGE_DIR / "evidence/m2/build/build-1.metadata.json").read_text()
+        )
+        repro.validate_buildkit_metadata(metadata, SHA256, 0)
+        for mutation in ("empty_ref", "bad_ref", "missing_provenance", "bad_output"):
+            with self.subTest(mutation=mutation):
+                candidate = copy.deepcopy(metadata)
+                if mutation == "empty_ref":
+                    candidate["buildx.build.ref"] = " "
+                elif mutation == "bad_ref":
+                    candidate["buildx.build.ref"] = "not-a-buildkit-reference"
+                elif mutation == "missing_provenance":
+                    del candidate["buildx.build.provenance"]
+                else:
+                    candidate["containerimage.descriptor"]["digest"] = (
+                        "sha256:" + "0" * 64
+                    )
+                with self.assertRaisesRegex(
+                    repro.ReproducibilityError,
+                    "BuildKit",
+                ):
+                    repro.validate_buildkit_metadata(candidate, SHA256, 0)
 
     def test_validate_definitions_includes_durable_measurement_evidence(self) -> None:
         report = repro.validate_definitions()
