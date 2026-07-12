@@ -169,11 +169,16 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
     // (TLS cipher order → JA3/JA4, header order, UA, viewport, timezone, locale, canvas/WebGL)
     // is a pure function of that seed. The seed is later logged in egress and bound into
     // report_data (VAL-ANTIBOT-033..037).
+    //
+    // Fallback material MUST NOT depend on the target URL/scheme. Unattended CLI scrapes without
+    // an explicit seed / task_id / nonce must still emit one stable default profile so HTTP and
+    // HTTPS hash the same validated effective-header list (request header canonicalization).
+    // Mission scrapes always supply task_id+nonce (or fingerprint_seed) and bypass this fallback.
     let fingerprint_seed = basecrawl_fp::resolve_seed(
         options.fingerprint_seed.as_deref(),
         options.task_id.as_deref(),
         options.nonce.as_deref(),
-        &format!("GET\0{}", url.as_str()),
+        basecrawl_fp::UNATTENDED_DEFAULT_SEED,
     );
     // Fail closed if a seed ever selects a weak security surface (VAL-ANTIBOT-038 / BOT-08).
     // Non-security dimensions (JA3/JA4, headers, UA, viewport, tz, locale, canvas) still vary.
@@ -194,6 +199,11 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
     } else {
         options.viewport
     };
+
+    // Reject ambiguous / transport-managed caller headers *before* any network work so the CLI
+    // and regression tests still get InvalidHeader for duplicate or case-variant field names,
+    // matching pre-seed request-header canonicalization (multi-value names stay unhashable).
+    fetch::validate_caller_headers(&options.headers)?;
 
     // Seed-owned header order + UA (plus caller credentials) is the single validated ordered
     // effective header list shared by request hashing, direct HTTP/HTTPS, and Chromium.

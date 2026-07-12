@@ -224,13 +224,20 @@ pub fn normalize_seed(input: &str) -> String {
     hex(&hasher.finalize())
 }
 
+/// Stable fallback used when no explicit seed and no task_id/nonce are supplied.
+///
+/// Must not depend on the target URL or scheme: unattended CLI scrapes (diagnostics, headers
+/// parity tests) share one default profile so HTTP and HTTPS emit identical effective headers.
+/// Mission workers always pass `task_id`/`nonce` or `--fingerprint-seed` and bypass this constant.
+pub const UNATTENDED_DEFAULT_SEED: &str = "basecrawl-unattended-default";
+
 /// Compose a seed from task/nonce material when the caller did not supply one explicitly.
 ///
 /// Preference:
 /// 1. Explicit non-empty seed.
 /// 2. `task_id || 0x00 || nonce` when either is present.
-/// 3. `fallback_material` (typically the request hash surface) so unattended scrapes stay
-///    deterministic and auditable.
+/// 3. `fallback_material` (typically [`UNATTENDED_DEFAULT_SEED`]) so unattended scrapes stay
+///    deterministic, auditable, and scheme-independent.
 pub fn resolve_seed(
     explicit: Option<&str>,
     task_id: Option<&str>,
@@ -840,8 +847,8 @@ mod tests {
         let from_task = resolve_seed(None, Some("task-1"), Some("nonce-9"), "fallback");
         assert_eq!(from_task, normalize_seed("task-1\0nonce-9"));
 
-        let fallback = resolve_seed(None, None, None, "request-hash-material");
-        assert_eq!(fallback, normalize_seed("request-hash-material"));
+        let fallback = resolve_seed(None, None, None, UNATTENDED_DEFAULT_SEED);
+        assert_eq!(fallback, normalize_seed(UNATTENDED_DEFAULT_SEED));
     }
 
     #[test]

@@ -191,6 +191,28 @@ pub fn parse_header(spec: &str) -> Result<(String, String), Error> {
     Ok((name.to_string(), value.to_string()))
 }
 
+/// Reject ambiguous or transport-managed *caller* headers before seed merge / network work.
+///
+/// Header names are case-insensitive in HTTP, so accepting two spellings of one name would make
+/// duplicate-field ordering transport-sensitive. Basecrawl therefore rejects those ambiguous
+/// inputs before robots, DNS, or any socket work. Transport-managed names (Host, User-Agent,
+/// Connection, Accept-Encoding, hop-by-hop) remain reserved: the seed-owned profile supplies UA and
+/// Accept*, and transports write the rest themselves.
+pub fn validate_caller_headers(headers: &[(String, String)]) -> Result<(), Error> {
+    let mut seen = HashSet::new();
+    for (name, value) in headers {
+        validate_header_pair(name, value)?;
+        let normalized = name.to_ascii_lowercase();
+        if is_transport_managed_header(&normalized) {
+            return Err(Error::InvalidHeader(name.to_string()));
+        }
+        if !seen.insert(normalized) {
+            return Err(Error::InvalidHeader(name.to_string()));
+        }
+    }
+    Ok(())
+}
+
 /// Build the one validated header representation used for hashing and every transport.
 ///
 /// Header names are case-insensitive in HTTP, so accepting two spellings of one name would make
@@ -204,22 +226,12 @@ pub fn effective_headers(
     user_agent: &str,
 ) -> Result<Vec<(String, String)>, Error> {
     validate_header_pair("User-Agent", user_agent)?;
+    validate_caller_headers(headers)?;
 
-    let mut seen = HashSet::new();
     let mut effective = Vec::with_capacity(headers.len() + 1);
     effective.push(("user-agent".to_string(), user_agent.to_string()));
-    seen.insert("user-agent".to_string());
-
     for (name, value) in headers {
-        validate_header_pair(name, value)?;
-        let normalized = name.to_ascii_lowercase();
-        if is_transport_managed_header(&normalized) {
-            return Err(Error::InvalidHeader(name.to_string()));
-        }
-        if !seen.insert(normalized.clone()) {
-            return Err(Error::InvalidHeader(name.to_string()));
-        }
-        effective.push((normalized, value.clone()));
+        effective.push((name.to_ascii_lowercase(), value.clone()));
     }
     Ok(effective)
 }
@@ -601,6 +613,12 @@ fn tls_config(
 
 /// Reorder the provider's TLS 1.3 suites to the seed-selected preference while keeping any
 /// remaining (TLS 1.2) suites after them so leftover peers still validate cleanly.
+///
+/// Suite identity must be the IANA suite id only. Matching on `std::mem::discriminant` is wrong:
+/// rustls's `SupportedCipherSuite` enum currently only has TLS1.2 / TLS1.3 variants, so every
+/// TLS1.2 suite shares one discriminant and would be collapsed to a single remaining entry — which
+/// drops RSA/ECDSA/ChaCha TLS 1.2 suites and makes commercial RSA origins / diagnostic TLS 1.2
+/// peers handshake-fail instead of reaching certificate validation.
 fn order_tls13_cipher_suites(
     default_suites: &[rustls::SupportedCipherSuite],
     preferred_names: &[String],
@@ -608,7 +626,7 @@ fn order_tls13_cipher_suites(
     use rustls::crypto::ring::cipher_suite::{
         TLS13_AES_128_GCM_SHA256, TLS13_AES_256_GCM_SHA384, TLS13_CHACHA20_POLY1305_SHA256,
     };
-    let mut ordered = Vec::with_capacity(default_suites.len());
+    let mut ordered = Vec::with_capacity(default_suites.len().max(preferred_names.len()));
     for name in preferred_names {
         let suite = match name.as_str() {
             "TLS13_AES_256_GCM_SHA384" => Some(TLS13_AES_256_GCM_SHA384),
@@ -617,15 +635,19 @@ fn order_tls13_cipher_suites(
             _ => None,
         };
         if let Some(suite) = suite {
-            ordered.push(suite);
+            if !ordered
+                .iter()
+                .any(|placed| suite_id(placed) == suite_id(&suite))
+            {
+                ordered.push(suite);
+            }
         }
     }
     for suite in default_suites {
-        let already = ordered.iter().any(|placed| {
-            std::mem::discriminant(placed) == std::mem::discriminant(suite)
-                || suite_id(placed) == suite_id(suite)
-        });
-        if !already {
+        if !ordered
+            .iter()
+            .any(|placed| suite_id(placed) == suite_id(suite))
+        {
             ordered.push(*suite);
         }
     }
