@@ -80,6 +80,9 @@ pub enum Error {
     #[error("TDX attestation failed: {0}")]
     Attestation(String),
 
+    #[error("enclave signature failed: {0}")]
+    EnclaveSignature(String),
+
     #[error("failed to write output file: {0}")]
     Io(String),
 }
@@ -111,6 +114,7 @@ impl Error {
             Error::DocumentExtraction(_) => "document_extraction",
             Error::EgressMetadata(_) => "egress_metadata_error",
             Error::Attestation(_) => "attestation_error",
+            Error::EnclaveSignature(_) => "enclave_signature_error",
             Error::Io(_) => "io_error",
         }
     }

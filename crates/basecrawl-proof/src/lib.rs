@@ -223,6 +223,18 @@ impl ScrapeProof {
     pub fn to_canonical_json(&self) -> String {
         serde_json::to_string(self).expect("ScrapeProof is always serializable")
     }
+
+    /// Serialize the canonical proof surface that the enclave signs.
+    ///
+    /// A signature cannot include its own bytes in the signed message. The signature slot is
+    /// therefore serialized as an explicit JSON `null`, while the enclave public key remains
+    /// present and is separately committed to the hardware report data. Validators reconstruct
+    /// these exact bytes before verifying `sdk_signature.sig`.
+    pub fn to_canonical_signing_json(&self) -> String {
+        let mut unsigned = self.clone();
+        unsigned.sdk_signature.sig = None;
+        unsigned.to_canonical_json()
+    }
 }
 
 #[cfg(test)]
@@ -349,6 +361,16 @@ mod tests {
     #[test]
     fn canonical_json_is_stable_across_runs() {
         assert_eq!(sample().to_canonical_json(), sample().to_canonical_json());
+    }
+
+    #[test]
+    fn signing_json_excludes_only_signature_bytes() {
+        let mut proof = sample();
+        proof.sdk_signature.enclave_pubkey = Some("11".repeat(32));
+        proof.sdk_signature.sig = Some("22".repeat(64));
+        let value: Value = serde_json::from_str(&proof.to_canonical_signing_json()).unwrap();
+        assert_eq!(value["sdk_signature"]["enclave_pubkey"], "11".repeat(32));
+        assert!(value["sdk_signature"]["sig"].is_null());
     }
 
     #[test]

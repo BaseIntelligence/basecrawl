@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://basecrawl.dev/schemas/scrapeproof-1.json",
   "title": "ScrapeProof v1",
-  "description": "Canonical non-attestation ScrapeProof envelope. Attestation and SDK-signature values remain nullable until their M2 producer is available.",
+  "description": "Canonical ScrapeProof envelope. Attestation and SDK-signature values are nullable for M1 proofs and populated for M2 proofs.",
   "type": "object",
   "required": [
     "version",
@@ -201,8 +201,8 @@
       "additionalProperties": false,
       "required": ["enclave_pubkey", "sig"],
       "properties": {
-        "enclave_pubkey": { "type": ["string", "null"] },
-        "sig": { "type": ["string", "null"] }
+        "enclave_pubkey": { "type": ["string", "null"], "pattern": "^[0-9a-fA-F]{64}$" },
+        "sig": { "type": ["string", "null"], "pattern": "^[0-9a-fA-F]{128}$" }
       }
     }
   },

@@ -34,10 +34,9 @@ pub struct ReportDataError {
 /// Assemble the full-width SHA-512 report-data binding for a proof.
 ///
 /// Components are concatenated byte-for-byte in the architecture-defined order. The pinned domain
-/// tag ends in NUL, separating this protocol from other report-data constructions without adding
-/// bytes between the ten components that are absent from the section 5.4 contract. The enclave
-/// public key is not available until the M2 signing-key feature populates it, so attestation
-/// callers must not claim a signed SDK identity until then.
+/// tag ends in NUL, separating this protocol from other report-data constructions. M2 appends the
+/// enclave public key as the final component, which makes a signature key substitution detectable
+/// from the hardware-signed report data.
 pub fn attestation_report_data(proof: &ScrapeProof) -> Result<String, ReportDataError> {
     let components = [
         required(proof.task_id.as_deref(), "task_id")?,
@@ -58,6 +57,10 @@ pub fn attestation_report_data(proof: &ScrapeProof) -> Result<String, ReportData
         required(
             proof.egress.fingerprint_seed.as_deref(),
             "egress.fingerprint_seed",
+        )?,
+        required(
+            proof.sdk_signature.enclave_pubkey.as_deref(),
+            "sdk_signature.enclave_pubkey",
         )?,
     ];
     let mut hasher = Sha512::new();
@@ -264,7 +267,10 @@ mod tests {
                 ..Egress::default()
             },
             attestation: Attestation::default(),
-            sdk_signature: SdkSignature::default(),
+            sdk_signature: SdkSignature {
+                enclave_pubkey: Some("99".repeat(32)),
+                sig: None,
+            },
         }
     }
 
@@ -280,6 +286,7 @@ mod tests {
             proof.egress.egress_ip.as_deref().unwrap(),
             proof.egress.timestamp.as_deref().unwrap(),
             proof.egress.fingerprint_seed.as_deref().unwrap(),
+            proof.sdk_signature.enclave_pubkey.as_deref().unwrap(),
         ];
         let mut hasher = Sha512::new();
         hasher.update(domain_tag);
@@ -290,13 +297,13 @@ mod tests {
     }
 
     #[test]
-    fn report_data_matches_exact_section_5_4_preimage() {
+    fn report_data_matches_exact_section_5_4_preimage_with_enclave_key() {
         let proof = attestation_proof();
         let expected = independent_report_data(&proof, ATTESTATION_DOMAIN_TAG);
         assert_eq!(
             expected,
-            "a76e1b18204aad10a802c825d58c7207a2bb6334c47a7b37adc83a83b79fa7b\
-             be204a3990d2f2e56f75fb2f7804a1cc59e0fb0ec8245ecde84439939194b88cd"
+            "3288310d6374c6e8a5f2f7b2e55c5b83f25f041847721a9d28899e2ab0762ff7\
+             35f2c02f077819911f71fd1953d66f8544842dfb966fd4ebe734d32f7ba74771"
         );
         assert_eq!(attestation_report_data(&proof).unwrap(), expected);
     }
@@ -356,8 +363,11 @@ mod tests {
         let mut changed = proof.clone();
         changed.egress.fingerprint_seed = Some("08".repeat(32));
         mutations.push(("fingerprint_seed", changed));
+        let mut changed = proof.clone();
+        changed.sdk_signature.enclave_pubkey = Some("aa".repeat(32));
+        mutations.push(("enclave_pubkey", changed));
 
-        assert_eq!(mutations.len(), 10);
+        assert_eq!(mutations.len(), 11);
         for (field, changed) in mutations {
             assert_ne!(
                 attestation_report_data(&changed).unwrap(),
@@ -384,6 +394,7 @@ mod tests {
             proof.egress.egress_ip.as_deref().unwrap(),
             proof.egress.timestamp.as_deref().unwrap(),
             proof.egress.fingerprint_seed.as_deref().unwrap(),
+            proof.sdk_signature.enclave_pubkey.as_deref().unwrap(),
         ] {
             hasher.update(component.as_bytes());
         }
@@ -429,6 +440,15 @@ mod tests {
             attestation_report_data(&empty).unwrap_err(),
             ReportDataError {
                 field: "tls.handshake_transcript_hash"
+            }
+        );
+
+        let mut missing_key = attestation_proof();
+        missing_key.sdk_signature.enclave_pubkey = None;
+        assert_eq!(
+            attestation_report_data(&missing_key).unwrap_err(),
+            ReportDataError {
+                field: "sdk_signature.enclave_pubkey"
             }
         );
     }

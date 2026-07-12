@@ -1,6 +1,8 @@
 use basecrawl_core::attestation::{
-    get_quote_at, quote_measurement, quote_report_data, QuoteRequestError,
+    get_quote_at, quote_measurement, quote_report_data, sign_at, verify_signature,
+    QuoteRequestError, SignRequestError,
 };
+use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Write};
@@ -89,6 +91,28 @@ fn serve_once(path: &PathBuf, body: String) -> thread::JoinHandle<Vec<u8>> {
         stream.write_all(response.as_bytes()).unwrap();
         request
     })
+}
+
+fn sign_fixture_with_seed(message: &[u8], seed: u8) -> (String, String) {
+    let signing_key = SigningKey::from_bytes(&[seed; 32]);
+    let signature = signing_key.sign(message);
+    (
+        signature
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
+        signing_key
+            .verifying_key()
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
+    )
+}
+
+fn sign_fixture(message: &[u8]) -> (String, String) {
+    sign_fixture_with_seed(message, 7)
 }
 
 #[test]
@@ -263,6 +287,46 @@ fn get_quote_rejects_an_unreachable_socket() {
     assert!(matches!(
         error,
         basecrawl_core::attestation::QuoteRequestError::SocketUnavailable { .. }
+    ));
+}
+
+#[test]
+fn sign_posts_to_guest_agent_and_verifies_over_the_exact_payload() {
+    let path = socket_path("sign");
+    let payload = b"canonical-proof-with-null-signature";
+    let (signature, public_key) = sign_fixture(payload);
+    let body = serde_json::json!({
+        "signature": signature,
+        "signature_chain": [],
+        "public_key": public_key,
+    })
+    .to_string();
+    let server = serve_once(&path, body);
+
+    let response = sign_at(&path, payload).unwrap();
+    let request = String::from_utf8(server.join().unwrap()).unwrap();
+    fs::remove_file(&path).unwrap();
+
+    assert!(request.contains(r#""algorithm":"ed25519""#));
+    assert!(request.contains(
+        r#""data":"63616e6f6e6963616c2d70726f6f662d776974682d6e756c6c2d7369676e6174757265""#
+    ));
+    verify_signature(&response.public_key, &response.signature, payload).unwrap();
+}
+
+#[test]
+fn signature_verification_rejects_a_substituted_public_key_or_payload() {
+    let payload = b"proof";
+    let (signature, public_key) = sign_fixture(payload);
+    assert!(verify_signature(&public_key, &signature, payload).is_ok());
+    assert!(matches!(
+        verify_signature(&public_key, &signature, b"substituted-proof"),
+        Err(SignRequestError::InvalidField("signature"))
+    ));
+    let (_, other_public_key) = sign_fixture_with_seed(payload, 8);
+    assert!(matches!(
+        verify_signature(&other_public_key, &signature, payload),
+        Err(SignRequestError::InvalidField("signature"))
     ));
 }
 

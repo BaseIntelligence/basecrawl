@@ -149,10 +149,15 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     verbose: bool,
 
-    /// Request a signed Intel TDX quote from /var/run/dstack.sock and populate attestation fields.
-    /// Outside a CVM this fails closed with no fabricated proof.
+    /// Request a signed Intel TDX quote and enclave signature from /var/run/dstack.sock and
+    /// populate M2 attestation fields. Outside a CVM this fails closed with no fabricated proof.
     #[arg(long, default_value_t = false)]
     attest: bool,
+
+    /// Explicitly request the M2 Ed25519 proof signature. Attestation also enables it, and the
+    /// public key is committed into report_data.
+    #[arg(long, default_value_t = false)]
+    sign_proof: bool,
 }
 
 fn run(cli: Cli) -> Result<String, Error> {
@@ -244,7 +249,8 @@ fn run(cli: Cli) -> Result<String, Error> {
         follow_pagination: cli.follow_pagination,
         max_pages: cli.max_pages,
         robots_policy: cli.robots,
-        attest: cli.attest,
+        attest: cli.attest || cli.sign_proof,
+        sign_proof: cli.sign_proof,
     };
 
     let proof = scrape(&raw_url, &options)?;

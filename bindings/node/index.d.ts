@@ -27,6 +27,8 @@ export interface ScrapeOptions {
   robotsPolicy?: "enforce" | "observe" | "ignore";
   robots_policy?: "enforce" | "observe" | "ignore";
   attest?: boolean;
+  signProof?: boolean;
+  sign_proof?: boolean;
 }
 
 export interface ScrapeProof {

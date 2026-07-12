@@ -59,6 +59,8 @@ struct BindingOptions {
     #[serde(alias = "robots_policy")]
     robots_policy: Option<String>,
     attest: Option<bool>,
+    #[serde(alias = "sign_proof")]
+    sign_proof: Option<bool>,
 }
 
 /// Error returned to bindings as the same structured JSON shape as core errors.
@@ -181,6 +183,9 @@ fn parse_options(options_json: Option<&str>) -> Result<ScrapeOptions, BindingErr
     }
     if let Some(attest) = binding_options.attest {
         options.attest = attest;
+    }
+    if let Some(sign_proof) = binding_options.sign_proof {
+        options.sign_proof = sign_proof;
     }
 
     Ok(options)

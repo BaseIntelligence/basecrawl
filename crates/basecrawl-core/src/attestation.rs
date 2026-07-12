@@ -5,6 +5,7 @@
 //! quote locally, and it fails closed when the socket or any required response field is missing.
 
 use basecrawl_proof::TdxMeasurement;
+use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{Read, Write};
@@ -93,6 +94,35 @@ pub enum QuoteRequestError {
     ReportDataMismatch { submitted: String, returned: String },
 }
 
+/// A response from the dstack `/Sign` endpoint using the enclave-derived Ed25519 key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SignResponse {
+    pub signature: String,
+    pub signature_chain: Vec<String>,
+    pub public_key: String,
+}
+
+#[derive(Debug, Error)]
+pub enum SignRequestError {
+    #[error("dstack signing payload is empty")]
+    EmptyPayload,
+
+    #[error("dstack signing endpoint returned HTTP status {status}")]
+    HttpStatus { status: u16 },
+
+    #[error("dstack signing endpoint returned malformed JSON: {0}")]
+    InvalidJson(#[from] serde_json::Error),
+
+    #[error("dstack signing endpoint returned an invalid field: {0}")]
+    InvalidField(&'static str),
+
+    #[error("dstack signing socket is unavailable: {source}")]
+    SocketUnavailable { source: std::io::Error },
+
+    #[error("dstack signing request failed: {0}")]
+    Io(#[from] std::io::Error),
+}
+
 /// The complete response returned by `POST /GetQuote`.
 ///
 /// `event_log` and `vm_config` are retained as JSON values because dstack versions may evolve
@@ -178,6 +208,104 @@ pub fn get_quote_at(
     }
     let value: QuoteResponse = serde_json::from_slice(response_body)?;
     validate_quote_response(value, &normalized_report_data)
+}
+
+/// Ask the dstack guest agent to sign a payload with the enclave-derived Ed25519 key.
+///
+/// The private key is never returned to this process. The `path` is fixed to a purpose-specific
+/// derivation path so callers cannot inject a host-selected key or key material.
+pub fn sign_at(socket_path: &Path, payload: &[u8]) -> Result<SignResponse, SignRequestError> {
+    if payload.is_empty() {
+        return Err(SignRequestError::EmptyPayload);
+    }
+    let body = serde_json::json!({
+        "algorithm": "ed25519",
+        "data": encode_hex(payload),
+    })
+    .to_string();
+    let mut stream = UnixStream::connect(socket_path)
+        .map_err(|source| SignRequestError::SocketUnavailable { source })?;
+    stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
+    stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
+    let request = format!(
+        "POST /Sign HTTP/1.1\r\nHost: dstack\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream.write_all(request.as_bytes())?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    let (status, response_body) =
+        parse_http_response_parts(&response).map_err(SignRequestError::Io)?;
+    if status != 200 {
+        return Err(SignRequestError::HttpStatus { status });
+    }
+    let response: SignResponse = serde_json::from_slice(response_body)?;
+    validate_sign_response(response)
+}
+
+fn validate_sign_response(response: SignResponse) -> Result<SignResponse, SignRequestError> {
+    if response.signature.is_empty() {
+        return Err(SignRequestError::InvalidField("signature"));
+    }
+    if response.public_key.is_empty() {
+        return Err(SignRequestError::InvalidField("public_key"));
+    }
+    let signature =
+        decode_hex(&response.signature).ok_or(SignRequestError::InvalidField("signature"))?;
+    if signature.len() != 64 {
+        return Err(SignRequestError::InvalidField("signature"));
+    }
+    let public_key =
+        decode_hex(&response.public_key).ok_or(SignRequestError::InvalidField("public_key"))?;
+    if public_key.len() != 32 {
+        return Err(SignRequestError::InvalidField("public_key"));
+    }
+    // Parsing the key and signature here ensures malformed guest-agent output is rejected before
+    // it can be attached to an otherwise valid quote. The message itself is checked by
+    // `verify_signature` after the canonical proof is assembled.
+    VerifyingKey::from_bytes(
+        public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| SignRequestError::InvalidField("public_key"))?,
+    )
+    .map_err(|_| SignRequestError::InvalidField("public_key"))?;
+    let _ = Signature::from_bytes(
+        signature
+            .as_slice()
+            .try_into()
+            .map_err(|_| SignRequestError::InvalidField("signature"))?,
+    );
+    Ok(SignResponse {
+        signature: response.signature.to_ascii_lowercase(),
+        signature_chain: response.signature_chain,
+        public_key: response.public_key.to_ascii_lowercase(),
+    })
+}
+
+/// Verify a guest-agent Ed25519 signature over canonical proof bytes.
+pub fn verify_signature(
+    public_key_hex: &str,
+    signature_hex: &str,
+    message: &[u8],
+) -> Result<(), SignRequestError> {
+    let public_key =
+        decode_hex(public_key_hex).ok_or(SignRequestError::InvalidField("public_key"))?;
+    let signature = decode_hex(signature_hex).ok_or(SignRequestError::InvalidField("signature"))?;
+    let public_key: [u8; 32] = public_key
+        .try_into()
+        .map_err(|_| SignRequestError::InvalidField("public_key"))?;
+    let signature: [u8; 64] = signature
+        .try_into()
+        .map_err(|_| SignRequestError::InvalidField("signature"))?;
+    let key = VerifyingKey::from_bytes(&public_key)
+        .map_err(|_| SignRequestError::InvalidField("public_key"))?;
+    let signature = Signature::from_bytes(&signature);
+    ed25519_dalek::Verifier::verify(&key, message, &signature)
+        .map_err(|_| SignRequestError::InvalidField("signature"))
 }
 
 fn normalize_report_data(input: &str) -> Result<String, QuoteRequestError> {
@@ -366,23 +494,27 @@ fn is_empty_json(value: &Value) -> bool {
 }
 
 fn parse_http_response(response: &[u8]) -> Result<(u16, &[u8]), QuoteRequestError> {
+    parse_http_response_parts(response).map_err(QuoteRequestError::Io)
+}
+
+fn parse_http_response_parts(response: &[u8]) -> Result<(u16, &[u8]), std::io::Error> {
     let header_end = response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
-        .ok_or_else(|| QuoteRequestError::Io(std::io::Error::other("missing HTTP headers")))?;
+        .ok_or_else(|| std::io::Error::other("missing HTTP headers"))?;
     let headers = &response[..header_end];
     let body = &response[header_end + 4..];
     let status_line_end = headers
         .iter()
         .position(|byte| *byte == b'\r')
-        .ok_or_else(|| QuoteRequestError::Io(std::io::Error::other("missing HTTP status")))?;
+        .ok_or_else(|| std::io::Error::other("missing HTTP status"))?;
     let status_line = std::str::from_utf8(&headers[..status_line_end])
-        .map_err(|_| QuoteRequestError::Io(std::io::Error::other("invalid HTTP status")))?;
+        .map_err(|_| std::io::Error::other("invalid HTTP status"))?;
     let status = status_line
         .split_whitespace()
         .nth(1)
         .and_then(|value| value.parse().ok())
-        .ok_or_else(|| QuoteRequestError::Io(std::io::Error::other("invalid HTTP status")))?;
+        .ok_or_else(|| std::io::Error::other("invalid HTTP status"))?;
     Ok((status, body))
 }
 

@@ -99,6 +99,9 @@ pub struct ScrapeOptions {
     pub robots_policy: RobotsPolicy,
     /// Request a genuine quote from the mounted dstack guest agent after assembling the proof.
     pub attest: bool,
+    /// Request an enclave-held Ed25519 signature over the canonical proof. This requires
+    /// attestation and never accepts host-supplied key material.
+    pub sign_proof: bool,
 }
 
 impl Default for ScrapeOptions {
@@ -127,6 +130,7 @@ impl Default for ScrapeOptions {
             max_pages: DEFAULT_MAX_PAGES,
             robots_policy: RobotsPolicy::Enforce,
             attest: false,
+            sign_proof: false,
         }
     }
 }
@@ -443,7 +447,28 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
         attestation: Attestation::default(),
         sdk_signature: SdkSignature::default(),
     };
+    if options.sign_proof && !options.attest {
+        return Err(Error::EnclaveSignature(
+            "signed proofs require attestation".to_string(),
+        ));
+    }
     if options.attest {
+        // Every M2 quote carries the enclave key commitment and signature. The explicit option
+        // remains useful to SDK callers as an intent marker, but cannot disable this invariant.
+        let sign_proof = options.sign_proof || options.attest;
+        if sign_proof {
+            // `/Sign` returns the public half of the guest-agent-derived key without exposing
+            // private material. Discover that public key first so it can be included in the
+            // report-data preimage before requesting the quote.
+            let key_probe = attestation::sign_at(
+                std::path::Path::new(attestation::DEFAULT_DSTACK_SOCKET),
+                b"basecrawl/enclave-signing-key/v1",
+            )
+            .map_err(|error| {
+                Error::Attestation(format!("guest-agent signing request failed: {error}"))
+            })?;
+            proof.sdk_signature.enclave_pubkey = Some(key_probe.public_key.clone());
+        }
         let report_data = canonical::attestation_report_data(&proof)
             .map_err(|error| Error::Attestation(format!("report_data assembly failed: {error}")))?;
         let quote = attestation::get_quote(&report_data).map_err(|error| {
@@ -458,6 +483,36 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
             measurement: Some(measurement),
             report_data: Some(quote.report_data),
         };
+        let signing_json = proof.to_canonical_signing_json();
+        let sign = attestation::sign_at(
+            std::path::Path::new(attestation::DEFAULT_DSTACK_SOCKET),
+            signing_json.as_bytes(),
+        )
+        .map_err(|error| {
+            Error::Attestation(format!("guest-agent signing request failed: {error}"))
+        })?;
+        let public_key = proof
+            .sdk_signature
+            .enclave_pubkey
+            .as_deref()
+            .ok_or_else(|| Error::EnclaveSignature("missing enclave public key".into()))?;
+        if sign.public_key != public_key {
+            return Err(Error::EnclaveSignature(
+                "guest-agent signing key changed during proof assembly".to_string(),
+            ));
+        }
+        proof.sdk_signature.sig = Some(sign.signature);
+        let signature = proof
+            .sdk_signature
+            .sig
+            .as_deref()
+            .ok_or_else(|| Error::EnclaveSignature("missing enclave signature".into()))?;
+        attestation::verify_signature(
+            public_key,
+            signature,
+            proof.to_canonical_signing_json().as_bytes(),
+        )
+        .map_err(|error| Error::EnclaveSignature(error.to_string()))?;
     }
     Ok(proof)
 }

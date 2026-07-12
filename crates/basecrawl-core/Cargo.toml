@@ -29,6 +29,7 @@ flate2.workspace = true
 brotli.workspace = true
 x509-parser.workspace = true
 sha2.workspace = true
+ed25519-dalek.workspace = true
 thiserror.workspace = true
 scraper.workspace = true
 ego-tree.workspace = true
