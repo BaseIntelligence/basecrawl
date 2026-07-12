@@ -17,6 +17,14 @@ from typing import Any, Mapping, Sequence
 
 SOURCE_DATE_EPOCH = "1700000000"
 EXPECTED_PLATFORM = "linux/amd64"
+EXPECTED_DESCRIPTOR_PLATFORM = {"architecture": "amd64", "os": "linux"}
+EXPECTED_FRONTEND = "gateway.v0"
+EXPECTED_SOURCE = (
+    "docker/dockerfile:1.7@"
+    "sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e"
+)
+EXPECTED_CMDLINE = EXPECTED_SOURCE
+EXPECTED_CONFIG_ENTRY_POINT = "Dockerfile"
 EXPECTED_BUILD_NAME = "basecrawl/image"
 EXPECTED_CONTEXT = "basecrawl"
 EXPECTED_DOCKERFILE = "image/Dockerfile"
@@ -207,6 +215,85 @@ def _history_materials(
     return frozenset(normalized)
 
 
+def _invocation_identity(
+    invocation: Mapping[str, Any],
+    *,
+    index: int,
+) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
+    """Normalize the complete BuildKit source/invocation identity.
+
+    The provenance schema has several nested maps whose unknown keys can
+    silently change what was built.  Keep the accepted surface deliberately
+    exact, then bind each value to the immutable history identity below.
+    """
+
+    config_source = invocation.get("configSource")
+    parameters = invocation.get("parameters")
+    environment = invocation.get("environment")
+    if (
+        set(invocation) != {"configSource", "parameters", "environment"}
+        or not isinstance(config_source, Mapping)
+        or set(config_source) != {"entryPoint"}
+        or config_source.get("entryPoint") != EXPECTED_CONFIG_ENTRY_POINT
+        or not isinstance(parameters, Mapping)
+        or set(parameters) != {"frontend", "args", "locals"}
+        or parameters.get("frontend") != EXPECTED_FRONTEND
+        or not isinstance(environment, Mapping)
+        or set(environment) != {"platform"}
+        or environment.get("platform") != EXPECTED_PLATFORM
+    ):
+        _fail(
+            f"BuildKit metadata[{index}] invocation identity is not canonical",
+            code="buildkit_invocation_mismatch",
+        )
+    args = parameters["args"]
+    locals_ = parameters["locals"]
+    if (
+        not isinstance(args, Mapping)
+        or set(args)
+        != {
+            "build-arg:SOURCE_DATE_EPOCH",
+            "cmdline",
+            "no-cache",
+            "source",
+        }
+        or args.get("build-arg:SOURCE_DATE_EPOCH") != SOURCE_DATE_EPOCH
+        or args.get("cmdline") != EXPECTED_CMDLINE
+        or args.get("no-cache") != ""
+        or args.get("source") != EXPECTED_SOURCE
+        or not isinstance(locals_, list)
+        or len(locals_) != 2
+        or any(
+            not isinstance(local, Mapping) or set(local) != {"name"}
+            for local in locals_
+        )
+        or [local["name"] for local in locals_] != ["context", "dockerfile"]
+    ):
+        _fail(
+            f"BuildKit metadata[{index}] source identity is not canonical",
+            code="buildkit_invocation_mismatch",
+        )
+    return config_source, parameters, environment
+
+
+def _descriptor_platform(
+    descriptor: Mapping[str, Any],
+    *,
+    index: int,
+) -> Mapping[str, str]:
+    platform = descriptor.get("platform")
+    if (
+        not isinstance(platform, Mapping)
+        or set(platform) != set(EXPECTED_DESCRIPTOR_PLATFORM)
+        or platform != EXPECTED_DESCRIPTOR_PLATFORM
+    ):
+        _fail(
+            f"BuildKit metadata[{index}] output descriptor platform is not canonical",
+            code="buildkit_output_mismatch",
+        )
+    return platform
+
+
 def _manifest_key(path: Path) -> str:
     path_text = path.as_posix()
     marker = "/evidence/m2/"
@@ -270,30 +357,42 @@ def _validate_history(
             code="buildkit_reference_mismatch",
         )
     environment = invocation["environment"]
-    if history.get("Platform") != [environment["platform"]]:
+    config_source = invocation["configSource"]
+    parameters = invocation["parameters"]
+    args = parameters["args"]
+    if (
+        parameters["frontend"] != EXPECTED_FRONTEND
+        or args["source"] != EXPECTED_SOURCE
+        or args["cmdline"] != EXPECTED_CMDLINE
+        or config_source["entryPoint"] != EXPECTED_DOCKERFILE.rsplit("/", 1)[-1]
+        or history["Dockerfile"] != EXPECTED_DOCKERFILE
+        or history["Context"] != EXPECTED_CONTEXT
+    ):
+        _fail(
+            f"BuildKit history[{index}] source and invocation identity does not match metadata",
+            code="buildkit_invocation_mismatch",
+        )
+    if not isinstance(history.get("Platform"), list) or history["Platform"] != [
+        environment["platform"]
+    ]:
         _fail(
             f"BuildKit history[{index}] invocation platform does not match metadata",
             code="buildkit_invocation_mismatch",
         )
-    parameters = invocation["parameters"]
-    args = parameters["args"]
     build_args = history.get("BuildArgs")
-    build_arg_values = (
-        {
-            item.get("Name"): item.get("Value")
-            for item in build_args
-            if isinstance(item, Mapping)
-        }
-        if isinstance(build_args, list)
-        else {}
-    )
     config = history.get("Config")
     if (
-        build_arg_values.get("SOURCE_DATE_EPOCH") != SOURCE_DATE_EPOCH
+        not isinstance(build_args, list)
+        or len(build_args) != 1
+        or not isinstance(build_args[0], Mapping)
+        or set(build_args[0]) != {"Name", "Value"}
+        or build_args[0].get("Name") != "SOURCE_DATE_EPOCH"
+        or build_args[0].get("Value") != SOURCE_DATE_EPOCH
         or not isinstance(config, Mapping)
+        or set(config) != {"ImageResolveMode", "NoCache", "SourceDateEpoch"}
+        or config.get("ImageResolveMode") != "local"
         or config.get("NoCache") is not True
         or config.get("SourceDateEpoch") != SOURCE_DATE_EPOCH
-        or args.get("build-arg:SOURCE_DATE_EPOCH") != SOURCE_DATE_EPOCH
     ):
         _fail(
             f"BuildKit history[{index}] invocation configuration does not match metadata",
@@ -381,25 +480,7 @@ def validate_buildkit_record(
     invocation = provenance.get("invocation")
     if not isinstance(invocation, Mapping):
         _fail(f"BuildKit metadata[{index}] has no provenance invocation")
-    parameters = invocation.get("parameters")
-    environment = invocation.get("environment")
-    if not isinstance(parameters, Mapping) or not isinstance(environment, Mapping):
-        _fail(f"BuildKit metadata[{index}] has no verifiable invocation identity")
-    args = parameters.get("args")
-    locals_ = parameters.get("locals")
-    if (
-        not isinstance(args, Mapping)
-        or not args.get("cmdline")
-        or not args.get("source")
-        or not isinstance(locals_, list)
-        or {item.get("name") for item in locals_ if isinstance(item, Mapping)}
-        != {"context", "dockerfile"}
-    ):
-        _fail(f"BuildKit metadata[{index}] invocation is missing source identity")
-    if environment.get("platform") != EXPECTED_PLATFORM:
-        _fail(
-            f"BuildKit metadata[{index}] invocation platform is not {EXPECTED_PLATFORM}"
-        )
+    _, parameters, environment = _invocation_identity(invocation, index=index)
     descriptor = metadata.get("containerimage.descriptor")
     if (
         not isinstance(descriptor, Mapping)
@@ -410,6 +491,15 @@ def validate_buildkit_record(
     ):
         _fail(
             f"BuildKit metadata[{index}] output descriptor is not bound to the digest",
+            code="buildkit_output_mismatch",
+        )
+    descriptor_platform = _descriptor_platform(descriptor, index=index)
+    if descriptor_platform != {
+        "architecture": environment["platform"].split("/", 1)[1],
+        "os": environment["platform"].split("/", 1)[0],
+    } or history.get("Platform") != [environment["platform"]]:
+        _fail(
+            f"BuildKit metadata[{index}] output platform is not bound to invocation history",
             code="buildkit_output_mismatch",
         )
     materials = _metadata_materials(provenance.get("materials"), index=index)
