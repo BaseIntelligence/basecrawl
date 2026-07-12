@@ -256,18 +256,185 @@ class MeasurementAllowlistTests(unittest.TestCase):
         self.assertEqual(
             [event["stage"] for event in execution["events"]],
             [
-                "deployment",
+                "deployment_request",
+                "deployment_result",
                 "evidence_capture",
                 "validation",
+                "validation",
+                "validation",
+                "validation",
                 "deletion",
-                "deployment",
+                "deployment_request",
+                "deployment_result",
                 "evidence_capture",
+                "validation",
+                "validation",
+                "validation",
                 "validation",
                 "deletion",
                 "final_inventory",
+                "reconciliation",
             ],
         )
-        self.assertNotIn("secret", execution_path.read_text().lower())
+        serialized = execution_path.read_text().lower()
+        for marker in ("private key", "api_key", "access_token", "authorization:"):
+            self.assertNotIn(marker, serialized)
+
+    def test_execution_record_binds_identities_artifacts_and_validation_results(
+        self,
+    ) -> None:
+        record = measurements.validate_reconciliation(
+            RECONCILIATION_PATH,
+            allowlist_path=ALLOWLIST_PATH,
+            app_compose_path=APP_COMPOSE_PATH,
+        )
+        execution_path = IMAGE_DIR / record["evidence_bundle"]["execution_record_path"]
+        execution = json.loads(execution_path.read_text())
+        self.assertEqual(
+            execution["record_id"], "m2-tee-integration/production-reconciliation"
+        )
+        self.assertTrue(execution["immutable"])
+        self.assertEqual(
+            [event["event_id"] for event in execution["events"]],
+            [f"m2-tee-audit-{index:04d}" for index in range(1, 19)],
+        )
+        for event in execution["events"]:
+            self.assertTrue(event["operation_id"].startswith("m2-tee-integration/"))
+            for artifact in event["artifacts"]:
+                self.assertRegex(artifact["path"], r"^evidence/m2/")
+                self.assertRegex(artifact["sha256"], r"^[0-9a-f]{64}$")
+            if event["stage"] == "validation":
+                result = event["validation"]
+                self.assertEqual(result["exit_code"], 0)
+                self.assertEqual(result["status"], "passed")
+                self.assertTrue(result["command"])
+
+    def test_execution_record_hash_anchor_rejects_tampering_after_manifest_rewrite(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shutil.copytree(IMAGE_DIR / "evidence", root / "evidence")
+            record = json.loads(RECONCILIATION_PATH.read_text())
+            execution_path = root / record["evidence_bundle"]["execution_record_path"]
+            execution = json.loads(execution_path.read_text())
+            execution["events"][0]["status"] = "failed"
+            execution_path.write_text(json.dumps(execution))
+            measurements.write_evidence_manifest(
+                root / record["evidence_bundle"]["manifest_path"]
+            )
+            path = root / "measurement-reconciliation.json"
+            path.write_text(json.dumps(record))
+            with self.assertRaisesRegex(
+                measurements.MeasurementAllowlistError,
+                "execution record",
+            ):
+                measurements.validate_reconciliation(
+                    path,
+                    allowlist_path=ALLOWLIST_PATH,
+                    app_compose_path=APP_COMPOSE_PATH,
+                )
+
+    def test_execution_record_rejects_reordering_even_after_manifest_rewrite(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shutil.copytree(IMAGE_DIR / "evidence", root / "evidence")
+            record = json.loads(RECONCILIATION_PATH.read_text())
+            execution_path = root / record["evidence_bundle"]["execution_record_path"]
+            execution = json.loads(execution_path.read_text())
+            execution["events"][0], execution["events"][1] = (
+                execution["events"][1],
+                execution["events"][0],
+            )
+            execution_path.write_text(json.dumps(execution))
+            measurements.write_evidence_manifest(
+                root / record["evidence_bundle"]["manifest_path"]
+            )
+            path = root / "measurement-reconciliation.json"
+            path.write_text(json.dumps(record))
+            with self.assertRaisesRegex(
+                measurements.MeasurementAllowlistError,
+                "execution record",
+            ):
+                measurements.validate_reconciliation(
+                    path,
+                    allowlist_path=ALLOWLIST_PATH,
+                    app_compose_path=APP_COMPOSE_PATH,
+                )
+
+    def test_execution_record_artifact_path_escape_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shutil.copytree(IMAGE_DIR / "evidence", root / "evidence")
+            record = json.loads(RECONCILIATION_PATH.read_text())
+            execution_path = root / record["evidence_bundle"]["execution_record_path"]
+            execution = json.loads(execution_path.read_text())
+            execution["events"][0]["artifacts"][0]["path"] = "../../outside.json"
+            execution_path.write_text(json.dumps(execution))
+            measurements.write_evidence_manifest(
+                root / record["evidence_bundle"]["manifest_path"]
+            )
+            path = root / "measurement-reconciliation.json"
+            path.write_text(json.dumps(record))
+            with self.assertRaisesRegex(
+                measurements.MeasurementAllowlistError,
+                "execution record",
+            ):
+                measurements.validate_reconciliation(
+                    path,
+                    allowlist_path=ALLOWLIST_PATH,
+                    app_compose_path=APP_COMPOSE_PATH,
+                )
+
+    def test_execution_record_omitted_event_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shutil.copytree(IMAGE_DIR / "evidence", root / "evidence")
+            record = json.loads(RECONCILIATION_PATH.read_text())
+            execution_path = root / record["evidence_bundle"]["execution_record_path"]
+            execution = json.loads(execution_path.read_text())
+            del execution["events"][4]
+            execution_path.write_text(json.dumps(execution))
+            measurements.write_evidence_manifest(
+                root / record["evidence_bundle"]["manifest_path"]
+            )
+            path = root / "measurement-reconciliation.json"
+            path.write_text(json.dumps(record))
+            with self.assertRaisesRegex(
+                measurements.MeasurementAllowlistError,
+                "event sequence",
+            ):
+                measurements.validate_reconciliation(
+                    path,
+                    allowlist_path=ALLOWLIST_PATH,
+                    app_compose_path=APP_COMPOSE_PATH,
+                )
+
+    def test_execution_record_sensitive_value_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shutil.copytree(IMAGE_DIR / "evidence", root / "evidence")
+            record = json.loads(RECONCILIATION_PATH.read_text())
+            execution_path = root / record["evidence_bundle"]["execution_record_path"]
+            execution = json.loads(execution_path.read_text())
+            execution["events"][0]["request"]["api_key"] = "redacted"
+            execution_path.write_text(json.dumps(execution))
+            measurements.write_evidence_manifest(
+                root / record["evidence_bundle"]["manifest_path"]
+            )
+            path = root / "measurement-reconciliation.json"
+            path.write_text(json.dumps(record))
+            with self.assertRaisesRegex(
+                measurements.MeasurementAllowlistError,
+                "sensitive material",
+            ):
+                measurements.validate_reconciliation(
+                    path,
+                    allowlist_path=ALLOWLIST_PATH,
+                    app_compose_path=APP_COMPOSE_PATH,
+                )
 
     def test_duplicate_json_keys_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

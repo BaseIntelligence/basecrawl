@@ -70,6 +70,11 @@ EXPECTED_RUNTIME_EVENTS = (
     "system-ready",
 )
 EVIDENCE_MANIFEST_VERSION = 1
+EXECUTION_RECORD_VERSION = 2
+EXECUTION_RECORD_ID = "m2-tee-integration/production-reconciliation"
+EXECUTION_ARTIFACT_PREFIX = "evidence/m2/"
+EXECUTION_EVENT_PREFIX = "m2-tee-audit-"
+EXECUTION_OPERATION_PREFIX = "m2-tee-integration/"
 DEPLOYMENT_FIELDS = frozenset(
     {
         "app_id",
@@ -229,7 +234,9 @@ def verify_evidence_manifest(path: Path | str) -> dict[str, str]:
         artifact = _repository_relative_path(target.parent, name, "manifest path")
         actual = hashlib.sha256(artifact.read_bytes()).hexdigest()
         if actual != digest:
-            raise MeasurementAllowlistError(f"evidence manifest digest mismatch: {name}")
+            raise MeasurementAllowlistError(
+                f"evidence manifest digest mismatch: {name}"
+            )
         expected[name] = digest
     actual_files = {
         item.relative_to(target.parent).as_posix()
@@ -405,7 +412,7 @@ def validate_reconciliation(
         bundle.get("manifest_path"),
         "evidence_bundle.manifest_path",
     )
-    verify_evidence_manifest(manifest_path)
+    manifest_files = verify_evidence_manifest(manifest_path)
     execution_path = _repository_relative_path(
         record_root,
         bundle.get("execution_record_path"),
@@ -555,11 +562,11 @@ def validate_reconciliation(
         image.get("registry_manifest_path"),
         "image.registry_manifest_path",
     )
-    if (
-        publish_metadata.get("containerimage.digest") != image.get("build_digest")
-        or "sha256:" + hashlib.sha256(registry_manifest_path.read_bytes()).hexdigest()
-        != image.get("build_digest")
-    ):
+    if publish_metadata.get("containerimage.digest") != image.get(
+        "build_digest"
+    ) or "sha256:" + hashlib.sha256(
+        registry_manifest_path.read_bytes()
+    ).hexdigest() != image.get("build_digest"):
         raise MeasurementAllowlistError("published image identity drift")
 
     live_evidence = record.get("live_evidence")
@@ -578,9 +585,7 @@ def validate_reconciliation(
         if isinstance(evidence, Mapping)
     ]
     if len(set(app_ids)) != 2 or len(set(cvm_names)) != 2:
-        raise MeasurementAllowlistError(
-            "live evidence deployments are not independent"
-        )
+        raise MeasurementAllowlistError("live evidence deployments are not independent")
     deployment_summaries = _validate_deployment_summaries(
         record.get("reconciliation_deployments"),
         live_evidence=live_evidence,
@@ -645,7 +650,9 @@ def validate_reconciliation(
         "cleanup inventory",
     )
     if not isinstance(cleanup, Mapping):
-        raise MeasurementAllowlistError("cleanup inventory does not prove ownership cleanup")
+        raise MeasurementAllowlistError(
+            "cleanup inventory does not prove ownership cleanup"
+        )
     expected_deleted = {deployment["cvm_name"] for deployment in deployment_records}
     protected = (
         cleanup_inventory.get("protected_user_cvm")
@@ -674,10 +681,14 @@ def validate_reconciliation(
         or protected.get("status") != "running"
         or protected.get("preserved") is not True
     ):
-        raise MeasurementAllowlistError("cleanup inventory does not prove ownership cleanup")
+        raise MeasurementAllowlistError(
+            "cleanup inventory does not prove ownership cleanup"
+        )
     _validate_execution_record(
         execution_record,
         deployment_records=deployment_records,
+        root=record_root,
+        manifest_files=manifest_files,
     )
     quote_verification = record.get("live_quote_verification")
     if (
@@ -739,36 +750,27 @@ def _validate_execution_record(
     value: Any,
     *,
     deployment_records: list[dict[str, Any]],
+    root: Path,
+    manifest_files: Mapping[str, str],
 ) -> None:
-    expected_events = [
-        {"deployment": "first", "stage": "deployment", "status": "created"},
-        {
-            "deployment": "first",
-            "stage": "evidence_capture",
-            "status": "complete",
-        },
-        {"deployment": "first", "stage": "validation", "status": "passed"},
-        {"deployment": "first", "stage": "deletion", "status": "deleted"},
-        {"deployment": "second", "stage": "deployment", "status": "created"},
-        {
-            "deployment": "second",
-            "stage": "evidence_capture",
-            "status": "complete",
-        },
-        {"deployment": "second", "stage": "validation", "status": "passed"},
-        {"deployment": "second", "stage": "deletion", "status": "deleted"},
-        {
-            "deployment": None,
-            "stage": "final_inventory",
-            "status": "ownership_clean",
-        },
-    ]
     if (
         not isinstance(value, Mapping)
-        or set(value) != {"version", "redacted", "events"}
-        or value.get("version") != 1
+        or set(value)
+        != {
+            "artifacts",
+            "events",
+            "immutable",
+            "record_id",
+            "redacted",
+            "redaction",
+            "version",
+        }
+        or value.get("version") != EXECUTION_RECORD_VERSION
+        or value.get("record_id") != EXECUTION_RECORD_ID
+        or value.get("immutable") is not True
         or value.get("redacted") is not True
-        or value.get("events") != expected_events
+        or not isinstance(value.get("redaction"), str)
+        or not value["redaction"]
         or len(deployment_records) != 2
         or any(
             deployment.get("created") is not True
@@ -778,6 +780,415 @@ def _validate_execution_record(
     ):
         raise MeasurementAllowlistError(
             "immutable redacted execution record is incomplete"
+        )
+    record_artifacts = _validate_execution_artifacts(
+        value.get("artifacts"),
+        root=root,
+        manifest_files=manifest_files,
+    )
+    expected_record_artifacts = {
+        f"{EXECUTION_ARTIFACT_PREFIX}{name}": digest
+        for name, digest in manifest_files.items()
+        if name != "execution/reconciliation.json"
+    }
+    if {
+        artifact["path"]: artifact["sha256"] for artifact in record_artifacts
+    } != expected_record_artifacts:
+        raise MeasurementAllowlistError(
+            "execution record does not bind the complete evidence manifest"
+        )
+    _reject_sensitive_execution_values(value)
+    events = value.get("events")
+    if not isinstance(events, list) or len(events) != 18:
+        raise MeasurementAllowlistError(
+            "immutable redacted execution record has an incomplete event sequence"
+        )
+    deployment_by_name = {
+        name: deployment
+        for name, deployment in zip(("first", "second"), deployment_records)
+    }
+    expected_stages = (
+        ("first", "deployment_request", "submitted"),
+        ("first", "deployment_result", "created"),
+        ("first", "evidence_capture", "complete"),
+        ("first", "validation", "passed"),
+        ("first", "validation", "passed"),
+        ("first", "validation", "passed"),
+        ("first", "validation", "passed"),
+        ("first", "deletion", "deleted"),
+        ("second", "deployment_request", "submitted"),
+        ("second", "deployment_result", "created"),
+        ("second", "evidence_capture", "complete"),
+        ("second", "validation", "passed"),
+        ("second", "validation", "passed"),
+        ("second", "validation", "passed"),
+        ("second", "validation", "passed"),
+        ("second", "deletion", "deleted"),
+        (None, "final_inventory", "ownership_clean"),
+        (None, "reconciliation", "passed"),
+    )
+    for index, (event, expected) in enumerate(zip(events, expected_stages)):
+        if not isinstance(event, Mapping):
+            raise MeasurementAllowlistError(
+                f"execution record event {index} is malformed"
+            )
+        deployment_name, stage, status = expected
+        required_event_fields = {
+            "artifacts",
+            "deployment",
+            "event_id",
+            "identities",
+            "immutable",
+            "operation_id",
+            "sequence",
+            "stage",
+            "status",
+        }
+        if stage in {"deployment_request", "deletion"}:
+            required_event_fields.add("request")
+        if stage in {
+            "deployment_result",
+            "deletion",
+            "evidence_capture",
+            "final_inventory",
+        }:
+            required_event_fields.add("response")
+        if stage in {"validation", "reconciliation"}:
+            required_event_fields.add("validation")
+        if set(event) != required_event_fields:
+            raise MeasurementAllowlistError(
+                f"execution record event {index} fields are incomplete"
+            )
+        if (
+            event.get("event_id") != f"{EXECUTION_EVENT_PREFIX}{index + 1:04d}"
+            or event.get("sequence") != index + 1
+            or event.get("deployment") != deployment_name
+            or event.get("stage") != stage
+            or event.get("status") != status
+            or event.get("immutable") is not True
+            or not isinstance(event.get("operation_id"), str)
+            or not event["operation_id"].startswith(EXECUTION_OPERATION_PREFIX)
+            or not isinstance(event.get("identities"), Mapping)
+        ):
+            raise MeasurementAllowlistError(
+                "immutable redacted execution record event order or identity drift"
+            )
+        _validate_execution_artifacts(
+            event.get("artifacts"),
+            root=root,
+            manifest_files=manifest_files,
+        )
+        identities = event["identities"]
+        if deployment_name is not None:
+            deployment = deployment_by_name[deployment_name]
+            for field in ("app_id", "cvm_id", "cvm_name", "vm_uuid"):
+                if identities.get(field) != deployment[field]:
+                    raise MeasurementAllowlistError(
+                        f"execution record {stage} identity drift for {deployment_name}"
+                    )
+        if stage == "deployment_request":
+            _validate_deployment_request(
+                event, deployment=deployment_by_name[deployment_name]
+            )
+        elif stage == "deployment_result":
+            _validate_deployment_result(
+                event, deployment=deployment_by_name[deployment_name]
+            )
+        elif stage == "evidence_capture":
+            _validate_capture_event(
+                event,
+                deployment_name=deployment_name,
+                deployment=deployment_by_name[deployment_name],
+                manifest_files=manifest_files,
+            )
+        elif stage == "validation":
+            _validate_validation_event(
+                event,
+                deployment_name=deployment_name,
+                deployment=deployment_by_name[deployment_name],
+                manifest_files=manifest_files,
+            )
+        elif stage == "deletion":
+            _validate_deletion_event(
+                event,
+                deployment=deployment_by_name[deployment_name],
+            )
+        elif stage == "final_inventory":
+            _validate_final_inventory_event(event)
+        elif stage == "reconciliation":
+            _validate_reconciliation_event(event)
+        _reject_sensitive_execution_values(event)
+
+
+def _validate_execution_artifacts(
+    value: Any,
+    *,
+    root: Path,
+    manifest_files: Mapping[str, str],
+) -> list[dict[str, str]]:
+    if not isinstance(value, list) or not value:
+        raise MeasurementAllowlistError(
+            "execution record artifact references are incomplete"
+        )
+    normalized: list[dict[str, str]] = []
+    for index, artifact in enumerate(value):
+        if (
+            not isinstance(artifact, Mapping)
+            or set(artifact) != {"path", "sha256"}
+            or not isinstance(artifact.get("path"), str)
+            or not isinstance(artifact.get("sha256"), str)
+            or HEX64.fullmatch(artifact["sha256"]) is None
+        ):
+            raise MeasurementAllowlistError(
+                f"execution record artifact {index} is malformed"
+            )
+        path = artifact["path"]
+        if not path.startswith(EXECUTION_ARTIFACT_PREFIX):
+            raise MeasurementAllowlistError(
+                f"execution record artifact path escapes evidence bundle: {path}"
+            )
+        relative = path[len(EXECUTION_ARTIFACT_PREFIX) :]
+        if not relative or relative not in manifest_files:
+            raise MeasurementAllowlistError(
+                f"execution record artifact is not manifest-covered: {path}"
+            )
+        artifact_path = _repository_relative_path(
+            root, path, f"execution artifact[{index}].path"
+        )
+        digest = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        if digest != artifact["sha256"] or digest != manifest_files[relative]:
+            raise MeasurementAllowlistError(
+                f"execution record artifact digest mismatch: {path}"
+            )
+        normalized.append({"path": path, "sha256": digest})
+    if len({item["path"] for item in normalized}) != len(normalized):
+        raise MeasurementAllowlistError(
+            "execution record contains duplicate artifact references"
+        )
+    return normalized
+
+
+def _validate_deployment_request(
+    event: Mapping[str, Any],
+    *,
+    deployment: Mapping[str, Any],
+) -> None:
+    request = event.get("request")
+    if (
+        not isinstance(request, Mapping)
+        or set(request)
+        != {
+            "automatic_placement",
+            "compose_path",
+            "compose_sha256",
+            "image_ref",
+            "instance_type",
+            "name",
+            "node_id",
+            "os_image",
+            "region",
+        }
+        or request.get("automatic_placement") is not True
+        or request.get("compose_path") != "evidence/m2/compose/docker-compose.yml"
+        or request.get("compose_sha256")
+        != "4778611a0654dab542e1a2149d3b16275e81c0293dba652ad1424a54b0338740"
+        or request.get("image_ref") != APPLICATION_IMAGE_REF
+        or request.get("instance_type") != "tdx.small"
+        or request.get("name") != deployment["cvm_name"]
+        or request.get("node_id") is not None
+        or request.get("os_image") != CATALOG_SLUG
+        or request.get("region") is not None
+    ):
+        raise MeasurementAllowlistError("execution record deployment request drift")
+
+
+def _validate_deployment_result(
+    event: Mapping[str, Any],
+    *,
+    deployment: Mapping[str, Any],
+) -> None:
+    response = event.get("response")
+    if (
+        not isinstance(response, Mapping)
+        or set(response) != {"app_id", "created", "cvm_id", "cvm_name", "vm_uuid"}
+        or response.get("app_id") != deployment["app_id"]
+        or response.get("created") is not True
+        or response.get("cvm_id") != deployment["cvm_id"]
+        or response.get("cvm_name") != deployment["cvm_name"]
+        or response.get("vm_uuid") != deployment["vm_uuid"]
+    ):
+        raise MeasurementAllowlistError("execution record deployment result drift")
+
+
+def _validate_capture_event(
+    event: Mapping[str, Any],
+    *,
+    deployment_name: str,
+    deployment: Mapping[str, Any],
+    manifest_files: Mapping[str, str],
+) -> None:
+    response = event.get("response")
+    if (
+        not isinstance(response, Mapping)
+        or set(response) != {"artifact_count", "captured", "status"}
+        or response.get("captured") is not True
+        or response.get("status") != "retained"
+        or response.get("artifact_count") != 5
+    ):
+        raise MeasurementAllowlistError("execution record evidence capture drift")
+    prefix = "evidence/m2/deployments/" + (deployment_name)
+    expected = {
+        f"{prefix}/attestation.json",
+        f"{prefix}/deployment.json",
+        f"{prefix}/event-log.json",
+        f"{prefix}/info.json",
+        f"{prefix}/quote.hex",
+    }
+    actual = {
+        artifact["path"]
+        for artifact in event["artifacts"]
+        if isinstance(artifact, Mapping)
+    }
+    if actual != expected or any(
+        path[len(EXECUTION_ARTIFACT_PREFIX) :] not in manifest_files for path in actual
+    ):
+        raise MeasurementAllowlistError("execution record evidence artifact drift")
+
+
+def _validate_validation_event(
+    event: Mapping[str, Any],
+    *,
+    deployment_name: str,
+    deployment: Mapping[str, Any],
+    manifest_files: Mapping[str, str],
+) -> None:
+    validation = event.get("validation")
+    if (
+        not isinstance(validation, Mapping)
+        or set(validation) != {"command", "exit_code", "result", "status"}
+        or not isinstance(validation.get("command"), str)
+        or not validation["command"]
+        or validation.get("exit_code") != 0
+        or validation.get("status") != "passed"
+        or not isinstance(validation.get("result"), Mapping)
+    ):
+        raise MeasurementAllowlistError("execution record validation result drift")
+    command = validation["command"]
+    if "dcap-qvl verify" in command:
+        expected_result = {"advisories": 0, "status": "UpToDate"}
+        required_suffix = "/quote.hex"
+    elif "dcap-qvl decode" in command:
+        expected_result = {"measurement": "allowlisted", "status": "decoded"}
+        required_suffix = "/quote.hex"
+    elif "replay_rtmr3" in command:
+        expected_result = {
+            "compose_hash": "5f87b1082fdb39e7345db64bb5d5b5b62fff01b0afc624ad4da861ede4361a42",
+            "status": "matched",
+        }
+        required_suffix = "/event-log.json"
+    elif "reproducibility.py validate" in command:
+        expected_result = {"image": "current_digest", "status": "reconciled"}
+        required_suffix = ""
+    else:
+        raise MeasurementAllowlistError(
+            "execution record validation command is unknown"
+        )
+    if dict(validation["result"]) != expected_result:
+        raise MeasurementAllowlistError("execution record validation result drift")
+    if required_suffix and not any(
+        isinstance(artifact, Mapping)
+        and artifact.get("path", "").endswith(f"{deployment_name}{required_suffix}")
+        for artifact in event["artifacts"]
+    ):
+        raise MeasurementAllowlistError("execution record validation artifact drift")
+    if not required_suffix and not any(
+        isinstance(artifact, Mapping)
+        and artifact.get("path") == "evidence/m2/measurement/dstack-mr-output.json"
+        for artifact in event["artifacts"]
+    ):
+        raise MeasurementAllowlistError(
+            "execution record reconciliation artifact drift"
+        )
+    del manifest_files
+
+
+def _validate_deletion_event(
+    event: Mapping[str, Any],
+    *,
+    deployment: Mapping[str, Any],
+) -> None:
+    request = event.get("request")
+    response = event.get("response")
+    if (
+        not isinstance(request, Mapping)
+        or set(request) != {"cvm_id", "cvm_name", "operation"}
+        or request.get("cvm_id") != deployment["cvm_id"]
+        or request.get("cvm_name") != deployment["cvm_name"]
+        or request.get("operation") != "phala cvms delete"
+        or not isinstance(response, Mapping)
+        or set(response) != {"cvm_id", "deleted", "status"}
+        or response.get("cvm_id") != deployment["cvm_id"]
+        or response.get("deleted") is not True
+        or response.get("status") != "deleted"
+    ):
+        raise MeasurementAllowlistError("execution record deletion result drift")
+
+
+def _validate_final_inventory_event(event: Mapping[str, Any]) -> None:
+    response = event.get("response")
+    if (
+        not isinstance(response, Mapping)
+        or set(response)
+        != {
+            "account_cvm_total",
+            "mission_owned_cvm_ids",
+            "mission_owned_cvm_total",
+            "protected_cvm",
+        }
+        or response.get("account_cvm_total") != 1
+        or response.get("mission_owned_cvm_ids") != []
+        or response.get("mission_owned_cvm_total") != 0
+        or response.get("protected_cvm")
+        != {
+            "cvm_id": PROTECTED_CVM_ID,
+            "cvm_name": PROTECTED_CVM_NAME,
+            "preserved": True,
+            "status": "running",
+        }
+    ):
+        raise MeasurementAllowlistError("execution record final inventory drift")
+
+
+def _validate_reconciliation_event(event: Mapping[str, Any]) -> None:
+    validation = event.get("validation")
+    if (
+        not isinstance(validation, Mapping)
+        or set(validation) != {"command", "exit_code", "result", "status"}
+        or validation.get("command") != "python3 image/reproducibility.py validate"
+        or validation.get("exit_code") != 0
+        or validation.get("status") != "passed"
+        or validation.get("result")
+        != {"evidence": "retained", "additional_deployment": False}
+    ):
+        raise MeasurementAllowlistError("execution record reconciliation result drift")
+
+
+def _reject_sensitive_execution_values(value: Any) -> None:
+    serialized = json.dumps(value, sort_keys=True, ensure_ascii=True).lower()
+    if any(
+        marker in serialized
+        for marker in (
+            "-----begin",
+            "private key",
+            "api_key",
+            "access_token",
+            "authorization:",
+            "password",
+            "report_data",
+        )
+    ):
+        raise MeasurementAllowlistError(
+            "immutable redacted execution record contains sensitive material"
         )
 
 
@@ -821,7 +1232,9 @@ def _catalog_artifacts_match(catalog: Mapping[str, Any], *, root: Path) -> bool:
             checksums[parts[1].lstrip("*")] = parts[0]
         digest = digest_path.read_text(encoding="utf-8").strip()
         release_digest = hashlib.sha256(checksum_path.read_bytes()).hexdigest()
-        rootfs_match = re.search(r"\bdstack\.rootfs_hash=([0-9a-f]{64})\b", metadata["cmdline"])
+        rootfs_match = re.search(
+            r"\bdstack\.rootfs_hash=([0-9a-f]{64})\b", metadata["cmdline"]
+        )
         if (
             metadata.get("version") != CATALOG_VERSION
             or metadata.get("git_revision") != META_DSTACK_COMMIT
@@ -839,7 +1252,8 @@ def _catalog_artifacts_match(catalog: Mapping[str, Any], *, root: Path) -> bool:
             or release_digest != digest
             or not rootfs_match
             or release.get("release_files_sha256") != release_hashes
-            or checksums != {
+            or checksums
+            != {
                 name: expected
                 for name, expected in release_hashes.items()
                 if name != "rootfs.img.verity"
