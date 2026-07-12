@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "basecrawl confidentiality: RA-TLS key-release client, in-enclave DoH/DoT, sealed-task AEAD decrypt"
+description = "basecrawl confidentiality: RA-TLS key-release client, in-enclave DoH/DoT, sealed-task AEAD decrypt, result seal to committee"
 
 [lib]
 name = "basecrawl_seal"
@@ -24,7 +24,9 @@ zeroize.workspace = true
 [dev-dependencies]
 # integration tests exercise HTTP key-release fixtures alongside sealed-box AEAD / DoH paths
 base64.workspace = true
+crypto_box = { workspace = true, features = ["std", "seal"] }
 rcgen = "0.13"
 rustls.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 webpki-roots.workspace = true

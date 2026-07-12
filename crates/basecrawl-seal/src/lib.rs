@@ -11,7 +11,11 @@
 //!   so the host stub resolver / port 53 never sees a cleartext QNAME for the
 //!   scrape target (VAL-CONF-013), complementing the in-process rustls TLS 1.3
 //!   terminator that already keeps HTTP application data off the host wire
-//!   (VAL-CONF-014).
+//!   (VAL-CONF-014);
+//! * **result sealing to the validator committee threshold public key** —
+//!   the ScrapeProof result body is sealed to the committee, never to the
+//!   miner, so the host-visible sealed-result payload stays opaque ciphertext
+//!   (VAL-CONF-015, VAL-CONF-017).
 //!
 //! Assertions satisfied by this crate for M3:
 //! * **VAL-CONF-011** — without a released / enclave-held key the sealed task
@@ -20,6 +24,10 @@
 //!   a pin-by-IP endpoint; no cleartext A/AAAA for the target on the host.
 //! * **VAL-CONF-014** — application traffic is TLS 1.3 application-data only
 //!   (enforced jointly with `basecrawl-core`'s rustls terminator).
+//! * **VAL-CONF-015** — sealed result is addressed to the committee threshold
+//!   public key; miner/host-held keys recover no result plaintext.
+//! * **VAL-CONF-017** — host-visible sealed result is opaque ciphertext; result
+//!   content markers never appear in the host-relayed envelope.
 //! * **VAL-CONF-027** — bit-flip or truncation of the sealed-task ciphertext
 //!   fails authenticated decryption; no partial plaintext is emitted or acted on.
 
@@ -29,6 +37,7 @@ pub mod dns;
 pub mod error;
 pub mod identity;
 pub mod keyrelease;
+pub mod result;
 pub mod task;
 
 pub use dns::{
@@ -45,6 +54,13 @@ pub use keyrelease::{
     to_report_data_field, HttpKeyReleaseTransport, KeyReleaseClient, KeyReleaseTransport,
     QuoteBundle, QuoteProvider, ReleasedTaskKey, DEFAULT_KEY_RELEASE_TIMEOUT, KEY_RELEASE_TAG,
     RA_TLS_PEER_HEADER, REPORT_DATA_LEN,
+};
+pub use result::{
+    build_result_aad, decrypt_result_as_miner_host, decrypt_result_with_foreign_key,
+    host_visible_contains_marker, seal_formats_to_committee, seal_result_to_committee,
+    unseal_result_with_committee_secret, CommitteeThresholdPublicKey, ResultSealPlaintext,
+    SealedResultEnvelope, RESULT_RECIPIENT_ROLE, RESULT_SEAL_DOMAIN, RESULT_SEAL_KIND,
+    RESULT_SEAL_SUITE,
 };
 pub use task::{
     build_aad, decrypt_sealed_task, decrypt_with_foreign_key, decrypt_without_released_key,
