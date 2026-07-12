@@ -70,7 +70,7 @@ class MeasurementAllowlistTests(unittest.TestCase):
         self.assertEqual(result["status"], "reconciled")
         self.assertEqual(
             result["canonical_measurement"]["compose_hash"],
-            "ac95f779827adb9a8f10b45fa0906e37b31148e6ea1e69e703b9afde13321104",
+            "5f87b1082fdb39e7345db64bb5d5b5b62fff01b0afc624ad4da861ede4361a42",
         )
 
     def test_missing_reconciliation_artifact_fails_closed(self) -> None:

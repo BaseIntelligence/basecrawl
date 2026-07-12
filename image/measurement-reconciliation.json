@@ -1,6 +1,6 @@
 {
   "canonical_measurement": {
-    "compose_hash": "ac95f779827adb9a8f10b45fa0906e37b31148e6ea1e69e703b9afde13321104",
+    "compose_hash": "5f87b1082fdb39e7345db64bb5d5b5b62fff01b0afc624ad4da861ede4361a42",
     "mrtd": "f06dfda6dce1cf904d4e2bab1dc370634cf95cefa2ceb2de2eee127c9382698090d7a4a13e14c536ec6c9c3c8fa87077",
     "os_image_hash": "bd369a8c2f9edb2b52dad48ac8e0b32dde5f1337c423a506b48d07403a7d8033",
     "rtmr0": "68102e7b524af310f7b7d426ce75481e36c40f5d513a9009c046e9d37e31551f0134d954b496a3357fd61d03f07ffe96",
@@ -25,7 +25,9 @@
     "version": "0.5.9"
   },
   "cleanup": {
-    "phala_cvms_total_after_cleanup": 0,
+    "account_cvm_total_after_cleanup": 1,
+    "mission_owned_cvm_total_after_cleanup": 0,
+    "protected_user_cvm_preserved": true,
     "temporary_cvms_deleted": true
   },
   "dstack_mr": {
@@ -45,16 +47,16 @@
   },
   "image": {
     "all_service_images_digest_pinned": true,
-    "build_digest": "sha256:c19d252fec7bb3e3e71c9281da1101312d5f2f09ec15d404a7ff373b3a6dbdd8",
+    "build_digest": "sha256:57a2ecdc9257846ca69dce38c53a464b68e9a08575fb45d8d18aed5b6b28f366",
     "compose_file": "docker-compose.yml",
-    "image_ref": "docker.io/mathiiss/basecrawl-cvm@sha256:c19d252fec7bb3e3e71c9281da1101312d5f2f09ec15d404a7ff373b3a6dbdd8"
+    "image_ref": "docker.io/mathiiss/basecrawl-cvm@sha256:57a2ecdc9257846ca69dce38c53a464b68e9a08575fb45d8d18aed5b6b28f366"
   },
   "live_event_replay": {
-    "compose_hash_event": "ac95f779827adb9a8f10b45fa0906e37b31148e6ea1e69e703b9afde13321104",
+    "compose_hash_event": "5f87b1082fdb39e7345db64bb5d5b5b62fff01b0afc624ad4da861ede4361a42",
     "event_log_index": 3,
     "evidence": [
       {
-        "cvm_name": "basecrawl-repro-51e0de73-c",
+        "cvm_name": "basecrawl-quote-20260711-2238",
         "event_names": [
           "system-preparing",
           "app-id",
@@ -67,11 +69,11 @@
           "storage-fs",
           "system-ready"
         ],
-        "replayed_rtmr3": "9e0b76e7f519538980b9002e7dae6b3619f582b2f79e5853397637c3cb05fcdb37884fb744a5b58b340dfd3b98f8015d",
-        "rtmr3": "9e0b76e7f519538980b9002e7dae6b3619f582b2f79e5853397637c3cb05fcdb37884fb744a5b58b340dfd3b98f8015d"
+        "replayed_rtmr3": "b84947add72a9ec85d3c069fba3a08d3a694d9a4a52b5d0ad1e3d73fb18d4c4eeffd1587d0a6b9da0fccd2144ba1d7ce",
+        "rtmr3": "b84947add72a9ec85d3c069fba3a08d3a694d9a4a52b5d0ad1e3d73fb18d4c4eeffd1587d0a6b9da0fccd2144ba1d7ce"
       },
       {
-        "cvm_name": "basecrawl-repro-51e0de73-d",
+        "cvm_name": "basecrawl-reconcile-20260711-f01368",
         "event_names": [
           "system-preparing",
           "app-id",
@@ -84,8 +86,8 @@
           "storage-fs",
           "system-ready"
         ],
-        "replayed_rtmr3": "6eff54e7ba177a401f3ce77c9c84d1496cc99442215dacefbb0b301c9be18b452d5a390e301fadc2f3c5979084452a41",
-        "rtmr3": "6eff54e7ba177a401f3ce77c9c84d1496cc99442215dacefbb0b301c9be18b452d5a390e301fadc2f3c5979084452a41"
+        "replayed_rtmr3": "e18384b488d1b6b06b1ef82a8d449416968bc47d553222259ba53f46b315c240a7a6f0d608cd3d90ad545fe9321004b2",
+        "rtmr3": "e18384b488d1b6b06b1ef82a8d449416968bc47d553222259ba53f46b315c240a7a6f0d608cd3d90ad545fe9321004b2"
       }
     ],
     "expected_events": [
@@ -102,15 +104,15 @@
     ],
     "key_provider_event_present": true,
     "os_image_hash_event": "bd369a8c2f9edb2b52dad48ac8e0b32dde5f1337c423a506b48d07403a7d8033",
-    "quote_rtmr3": "9e0b76e7f519538980b9002e7dae6b3619f582b2f79e5853397637c3cb05fcdb37884fb744a5b58b340dfd3b98f8015d",
-    "replayed_rtmr3": "9e0b76e7f519538980b9002e7dae6b3619f582b2f79e5853397637c3cb05fcdb37884fb744a5b58b340dfd3b98f8015d",
+    "quote_rtmr3": "b84947add72a9ec85d3c069fba3a08d3a694d9a4a52b5d0ad1e3d73fb18d4c4eeffd1587d0a6b9da0fccd2144ba1d7ce",
+    "replayed_rtmr3": "b84947add72a9ec85d3c069fba3a08d3a694d9a4a52b5d0ad1e3d73fb18d4c4eeffd1587d0a6b9da0fccd2144ba1d7ce",
     "runtime_event_type": 134217729
   },
   "live_evidence": [
     {
-      "app_id": "a0025435343fb0aa6a3dda1f0993ab55d4799a0b",
-      "attestation_path": "/tmp/basecrawl-cvm-c-attestation.json",
-      "cvm_name": "basecrawl-repro-51e0de73-c",
+      "app_id": "bd003bdb2818d54e93ef23e5490f3292b54685b7",
+      "attestation_path": "/tmp/basecrawl-quote-attestation-cli.json",
+      "cvm_name": "basecrawl-quote-20260711-2238",
       "event_names": [
         "system-preparing",
         "app-id",
@@ -123,16 +125,16 @@
         "storage-fs",
         "system-ready"
       ],
-      "info_path": "/tmp/basecrawl-cvm-c-get.json",
-      "quote_path": "/tmp/basecrawl-quote-c.hex",
-      "quote_rtmr3": "9e0b76e7f519538980b9002e7dae6b3619f582b2f79e5853397637c3cb05fcdb37884fb744a5b58b340dfd3b98f8015d",
-      "replayed_rtmr3": "9e0b76e7f519538980b9002e7dae6b3619f582b2f79e5853397637c3cb05fcdb37884fb744a5b58b340dfd3b98f8015d",
-      "rtmr3": "9e0b76e7f519538980b9002e7dae6b3619f582b2f79e5853397637c3cb05fcdb37884fb744a5b58b340dfd3b98f8015d"
+      "info_path": "/tmp/basecrawl-quote-cvm-final.json",
+      "quote_path": "/tmp/basecrawl-first-cert-quote.hex",
+      "quote_rtmr3": "b84947add72a9ec85d3c069fba3a08d3a694d9a4a52b5d0ad1e3d73fb18d4c4eeffd1587d0a6b9da0fccd2144ba1d7ce",
+      "replayed_rtmr3": "b84947add72a9ec85d3c069fba3a08d3a694d9a4a52b5d0ad1e3d73fb18d4c4eeffd1587d0a6b9da0fccd2144ba1d7ce",
+      "rtmr3": "b84947add72a9ec85d3c069fba3a08d3a694d9a4a52b5d0ad1e3d73fb18d4c4eeffd1587d0a6b9da0fccd2144ba1d7ce"
     },
     {
-      "app_id": "a7a6f6c541f50d7ed81005752b68c4300571fdbc",
-      "attestation_path": "/tmp/basecrawl-cvm-d-attestation.json",
-      "cvm_name": "basecrawl-repro-51e0de73-d",
+      "app_id": "ba6462953533760fc71ba76e4c5243143c57cdc0",
+      "attestation_path": "/tmp/basecrawl-reconcile-attestation.json",
+      "cvm_name": "basecrawl-reconcile-20260711-f01368",
       "event_names": [
         "system-preparing",
         "app-id",
@@ -145,19 +147,29 @@
         "storage-fs",
         "system-ready"
       ],
-      "info_path": "/tmp/basecrawl-cvm-d-get.json",
-      "quote_path": "/tmp/basecrawl-quote-d.hex",
-      "quote_rtmr3": "6eff54e7ba177a401f3ce77c9c84d1496cc99442215dacefbb0b301c9be18b452d5a390e301fadc2f3c5979084452a41",
-      "replayed_rtmr3": "6eff54e7ba177a401f3ce77c9c84d1496cc99442215dacefbb0b301c9be18b452d5a390e301fadc2f3c5979084452a41",
-      "rtmr3": "6eff54e7ba177a401f3ce77c9c84d1496cc99442215dacefbb0b301c9be18b452d5a390e301fadc2f3c5979084452a41"
+      "info_path": "/tmp/basecrawl-reconcile-get.json",
+      "quote_path": "/tmp/basecrawl-second-cert-quote.hex",
+      "quote_rtmr3": "e18384b488d1b6b06b1ef82a8d449416968bc47d553222259ba53f46b315c240a7a6f0d608cd3d90ad545fe9321004b2",
+      "replayed_rtmr3": "e18384b488d1b6b06b1ef82a8d449416968bc47d553222259ba53f46b315c240a7a6f0d608cd3d90ad545fe9321004b2",
+      "rtmr3": "e18384b488d1b6b06b1ef82a8d449416968bc47d553222259ba53f46b315c240a7a6f0d608cd3d90ad545fe9321004b2"
     }
   ],
   "live_info": {
     "app_compose_path": "phala-app-compose.json",
-    "app_compose_sha256": "ac95f779827adb9a8f10b45fa0906e37b31148e6ea1e69e703b9afde13321104",
+    "app_compose_sha256": "5f87b1082fdb39e7345db64bb5d5b5b62fff01b0afc624ad4da861ede4361a42",
     "catalog_identity_confirmed": true,
-    "compose_hash": "ac95f779827adb9a8f10b45fa0906e37b31148e6ea1e69e703b9afde13321104",
+    "compose_hash": "5f87b1082fdb39e7345db64bb5d5b5b62fff01b0afc624ad4da861ede4361a42",
     "os_image_hash": "bd369a8c2f9edb2b52dad48ac8e0b32dde5f1337c423a506b48d07403a7d8033"
+  },
+  "live_info_comparison": {
+    "byte_identical_registers": true,
+    "compose_hash_equal": true,
+    "image_digest_equal": true,
+    "independent_app_ids": [
+      "bd003bdb2818d54e93ef23e5490f3292b54685b7",
+      "ba6462953533760fc71ba76e4c5243143c57cdc0"
+    ],
+    "os_identity_equal": true
   },
   "live_quote_verification": {
     "advisory_ids": [],
@@ -189,6 +201,26 @@
     },
     "official_qemu_8_matches_live": true,
     "official_qemu_9_matches_local_source_build": true
+  },
+  "reconciliation_deployments": {
+    "first": {
+      "app_id": "bd003bdb2818d54e93ef23e5490f3292b54685b7",
+      "automatic_placement": true,
+      "cvm_name": "basecrawl-quote-20260711-2238",
+      "image": "dstack-0.5.9-bd369a8c",
+      "instance_type": "tdx.small",
+      "requested_node_id": null,
+      "requested_region": null
+    },
+    "second": {
+      "app_id": "ba6462953533760fc71ba76e4c5243143c57cdc0",
+      "automatic_placement": true,
+      "cvm_name": "basecrawl-reconcile-20260711-f01368",
+      "image": "dstack-0.5.9-bd369a8c",
+      "instance_type": "tdx.small",
+      "requested_node_id": null,
+      "requested_region": null
+    }
   },
   "source_pins": {
     "dstack": "282eeb27d22d8f091ad0fa5a90e638f85cf68751",

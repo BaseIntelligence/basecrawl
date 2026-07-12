@@ -290,9 +290,9 @@ def validate_reconciliation(
         not isinstance(image, Mapping)
         or image.get("image_ref")
         != "docker.io/mathiiss/basecrawl-cvm@sha256:"
-        "c19d252fec7bb3e3e71c9281da1101312d5f2f09ec15d404a7ff373b3a6dbdd8"
+        "57a2ecdc9257846ca69dce38c53a464b68e9a08575fb45d8d18aed5b6b28f366"
         or image.get("build_digest")
-        != "sha256:c19d252fec7bb3e3e71c9281da1101312d5f2f09ec15d404a7ff373b3a6dbdd8"
+        != "sha256:57a2ecdc9257846ca69dce38c53a464b68e9a08575fb45d8d18aed5b6b28f366"
         or image.get("all_service_images_digest_pinned") is not True
     ):
         raise MeasurementAllowlistError("application image identity is not pinned")
