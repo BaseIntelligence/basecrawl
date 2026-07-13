@@ -78,6 +78,65 @@ pub fn httpbin_env_override() -> Option<String> {
     None
 }
 
+/// True when HTTP-semantics tests are pointed at a hermetic plain-HTTP origin (CI sets this).
+///
+/// Public HTTPS / TLS 1.3 open-web smokes must not run under this configuration: GHA routinely
+/// blocks or times out pinned DoH/DoT, which is an environment constraint, not a product defect.
+pub fn hermetic_http_loopback_httpbin() -> bool {
+    let Some(base) = httpbin_env_override() else {
+        return false;
+    };
+    let Ok(url) = url::Url::parse(&base) else {
+        return false;
+    };
+    if url.scheme() != "http" {
+        return false;
+    }
+    match url.host() {
+        Some(url::Host::Ipv4(addr)) => addr.is_loopback(),
+        Some(url::Host::Ipv6(addr)) => addr.is_loopback(),
+        Some(url::Host::Domain(host)) => {
+            host.eq_ignore_ascii_case("localhost") || host.eq_ignore_ascii_case("localhost.")
+        }
+        None => false,
+    }
+}
+
+/// Optional operator opt-in to enforce public open-web smoke even under hermetic HTTPBIN.
+///
+/// Accepted truthy values: `1`, `true`, `yes` (case-insensitive).
+pub fn open_web_enforced() -> bool {
+    match std::env::var("BASECRAWL_OPEN_WEB") {
+        Ok(value) => {
+            let value = value.trim();
+            value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+        }
+        Err(_) => false,
+    }
+}
+
+/// Whether a public HTTPS open-web check should attempt the network.
+///
+/// Under CI's hermetic plain-HTTP loopback `BASECRAWL_HTTPBIN_BASE`, public TLS smokes are off by
+/// default. Local developers without the override keep the optional open-web signal. Set
+/// `BASECRAWL_OPEN_WEB=1` to force public origins even when the hermetic override is present.
+pub fn should_attempt_public_open_web() -> bool {
+    open_web_enforced() || !hermetic_http_loopback_httpbin()
+}
+
+/// Skip public open-web noise on hermetic CI. Returns `true` when the caller should early-return.
+pub fn skip_public_open_web_if_hermetic(name: &str) -> bool {
+    if should_attempt_public_open_web() {
+        return false;
+    }
+    eprintln!(
+        "{name} open-web smoke skipped: BASECRAWL_HTTPBIN_BASE/HTTPBIN_BASE is hermetic HTTP \
+         loopback (CI); public TLS/DoH egress is not required for hermetic green. Set \
+         BASECRAWL_OPEN_WEB=1 to force this public origin check."
+    );
+    true
+}
+
 fn leak_string(value: String) -> &'static str {
     Box::leak(value.into_boxed_str())
 }
@@ -381,12 +440,28 @@ fn parse_error_envelope(stderr: &[u8]) -> Result<Value, FatalSmokeFailure> {
 
 fn classify_transport_failure(message: &str) -> Option<TransientOriginFailure> {
     let message = message.to_ascii_lowercase();
+    // Prefer timeout markers before generic connect hedges: pinned DoH/DoT reports
+    // "resolver TCP connect: connection timed out" which is an availability flake, not a
+    // permanent product fault.
     if [
+        "timed out",
+        "timeout",
+        "deadline exceeded",
+        "operation timed out",
+    ]
+    .iter()
+    .any(|marker| message.contains(marker))
+    {
+        Some(TransientOriginFailure::Timeout)
+    } else if [
         "dns error",
         "failed to lookup",
         "name or service not known",
         "no such host",
         "temporary failure in name resolution",
+        "doh/dot resolution failed",
+        "resolution failed",
+        "nxdomain",
     ]
     .iter()
     .any(|marker| message.contains(marker))
@@ -398,6 +473,9 @@ fn classify_transport_failure(message: &str) -> Option<TransientOriginFailure> {
         "connection aborted",
         "connect error",
         "failed to connect",
+        "resolver tcp connect",
+        "network is unreachable",
+        "no route to host",
     ]
     .iter()
     .any(|marker| message.contains(marker))

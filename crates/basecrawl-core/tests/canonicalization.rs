@@ -1,4 +1,9 @@
 //! End-to-end canonicalization and deterministic quorum assertions (VAL-CRAWL-085..092).
+//!
+//! Public origin coverage is optional under hermetic CI
+//! (`BASECRAWL_HTTPBIN_BASE` plain HTTP loopback). Set `BASECRAWL_OPEN_WEB=1` to force it.
+
+mod common;
 
 use serde_json::Value;
 use std::process::{Command, Output};
@@ -50,6 +55,9 @@ fn assert_sha256(value: &str, name: &str) {
 // VAL-CRAWL-085, VAL-CRAWL-086, VAL-CRAWL-088, VAL-CRAWL-090, VAL-CRAWL-091, VAL-CRAWL-092.
 #[test]
 fn static_scrapes_have_a_stable_canonical_result_surface() {
+    if common::skip_public_open_web_if_hermetic("example.com canonical result surface") {
+        return;
+    }
     let args = [
         EXAMPLE,
         "--formats",
@@ -134,6 +142,9 @@ fn static_scrapes_have_a_stable_canonical_result_surface() {
 // VAL-CRAWL-087.
 #[test]
 fn request_hash_is_deterministic_and_binds_request_inputs() {
+    if common::skip_public_open_web_if_hermetic("example.com request_hash") {
+        return;
+    }
     let args = [
         EXAMPLE,
         "--formats",
@@ -182,6 +193,9 @@ fn request_hash_is_deterministic_and_binds_request_inputs() {
 // VAL-CRAWL-089.
 #[test]
 fn reconciliation_digest_binds_url_nonce_and_result_hash() {
+    if common::skip_public_open_web_if_hermetic("example.com reconciliation digest") {
+        return;
+    }
     let args = [
         EXAMPLE,
         "--formats",

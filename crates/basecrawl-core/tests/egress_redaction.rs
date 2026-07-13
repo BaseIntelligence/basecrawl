@@ -1,4 +1,8 @@
 //! Egress and confidentiality-boundary assertions (VAL-CRAWL-117..121).
+//!
+//! Public origin checks skip under hermetic CI; set `BASECRAWL_OPEN_WEB=1` to force them.
+
+mod common;
 
 use basecrawl_core::{scrape, Action, Format, ScrapeOptions};
 use serde_json::Value;
@@ -36,6 +40,9 @@ fn scrape_json(args: &[&str]) -> Value {
 // VAL-CRAWL-117..120.
 #[test]
 fn scrape_emits_complete_non_attestation_egress_metadata() {
+    if common::skip_public_open_web_if_hermetic("example.com egress metadata") {
+        return;
+    }
     let proof = scrape_json(&[EXAMPLE, "--no-js"]);
     let egress = proof["egress"]
         .as_object()
@@ -131,6 +138,9 @@ fn egress_timestamp_tracks_the_network_fetch_not_later_render_steps() {
 // VAL-CRAWL-122.
 #[test]
 fn emitted_proof_validates_against_the_published_schema() {
+    if common::skip_public_open_web_if_hermetic("example.com schema validation") {
+        return;
+    }
     let schema: Value = serde_json::from_str(include_str!(
         "../../basecrawl-proof/schema/scrapeproof.schema.json"
     ))

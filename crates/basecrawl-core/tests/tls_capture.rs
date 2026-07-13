@@ -154,6 +154,9 @@ fn openssl_leaf_der(host: &str) -> Vec<u8> {
 // VAL-CRAWL-074 through VAL-CRAWL-082.
 #[test]
 fn captures_tls13_chain_ground_truth_and_session_metadata() {
+    if common::skip_public_open_web_if_hermetic("example.com TLS 1.3 capture") {
+        return;
+    }
     let proof = scrape_json("https://example.com");
     let tls = &proof["tls"];
 
@@ -225,6 +228,9 @@ fn captures_tls13_chain_ground_truth_and_session_metadata() {
 // VAL-CRAWL-078 and VAL-CRAWL-080.
 #[test]
 fn tls_chain_hash_is_stable_and_transcript_varies_per_session() {
+    if common::skip_public_open_web_if_hermetic("example.com TLS hash stability") {
+        return;
+    }
     let first = scrape_json("https://example.com");
     let second = scrape_json("https://example.com");
 
@@ -242,6 +248,9 @@ fn tls_chain_hash_is_stable_and_transcript_varies_per_session() {
 // primitive or the TLS 1.3 ServerHello key share, so it must never be emitted as a ScrapeProof.
 #[test]
 fn valid_tls12_origin_fails_without_emitting_a_proof() {
+    if common::skip_public_open_web_if_hermetic("httpbin.org TLS 1.2 rejection") {
+        return;
+    }
     let rejected = run(&[
         "https://httpbin.org/get",
         "--formats",
@@ -273,6 +282,9 @@ fn valid_tls12_origin_fails_without_emitting_a_proof() {
 // VAL-CRAWL-084.
 #[test]
 fn invalid_certificates_fail_closed_unless_explicitly_insecure() {
+    if common::skip_public_open_web_if_hermetic("badssl certificate validation") {
+        return;
+    }
     for url in [
         "https://expired.badssl.com",
         "https://self-signed.badssl.com",

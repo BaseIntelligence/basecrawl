@@ -39,6 +39,9 @@ fn scrape_json(args: &[&str]) -> Value {
 // VAL-CRAWL-013: status_code is accurate for a 200 page.
 #[test]
 fn status_code_200_for_example_com() {
+    if common::skip_public_open_web_if_hermetic("example.com status_code 200") {
+        return;
+    }
     let v = scrape_json(&["https://example.com"]);
     assert_eq!(
         v["response"]["status_code"], 200,
@@ -49,6 +52,9 @@ fn status_code_200_for_example_com() {
 // VAL-CRAWL-014: content_length equals the decoded body byte length.
 #[test]
 fn content_length_equals_decoded_body_length() {
+    if common::skip_public_open_web_if_hermetic("example.com content_length") {
+        return;
+    }
     let v = scrape_json(&["https://example.com", "--formats", "rawHtml"]);
     let cl = v["response"]["content_length"]
         .as_u64()
@@ -67,6 +73,9 @@ fn content_length_equals_decoded_body_length() {
 // VAL-CRAWL-015: headers_hash and body_hash are lowercase-hex SHA-256 digests.
 #[test]
 fn headers_and_body_hash_are_lowercase_hex_64() {
+    if common::skip_public_open_web_if_hermetic("example.com response hashes") {
+        return;
+    }
     let v = scrape_json(&["https://example.com"]);
     for key in ["headers_hash", "body_hash"] {
         let h = v["response"][key]

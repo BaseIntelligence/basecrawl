@@ -150,6 +150,9 @@ fn fixture_url() -> &'static str {
 // VAL-CRAWL-036: rawHtml is the unmodified served HTML (byte-equivalent to curl, modulo charset).
 #[test]
 fn rawhtml_is_unmodified_served_source() {
+    if common::skip_public_open_web_if_hermetic("example.com rawHtml") {
+        return;
+    }
     let v = scrape_json(&[EXAMPLE, "--formats", "rawHtml"]);
     let raw = produced(&v, "rawHtml");
     let reference = curl(EXAMPLE);
@@ -174,6 +177,9 @@ fn rawhtml_is_unmodified_served_source() {
 // VAL-CRAWL-037: html is a valid, cleaned/rendered DOM serialization that may differ from rawHtml.
 #[test]
 fn html_is_cleaned_serialized_dom() {
+    if common::skip_public_open_web_if_hermetic("example.com html/rawHtml cleaned DOM") {
+        return;
+    }
     let v = scrape_json(&[EXAMPLE, "--formats", "html,rawHtml"]);
     let html = produced(&v, "html");
     let raw = produced(&v, "rawHtml");
@@ -203,6 +209,9 @@ fn html_is_cleaned_serialized_dom() {
 // VAL-CRAWL-038 smoke check: the public JS page still renders through Chromium and retains source.
 #[test]
 fn remote_js_page_smoke_renders_html_and_retains_source() {
+    if common::skip_public_open_web_if_hermetic("quotes.toscrape.com JS render") {
+        return;
+    }
     let proof = match common::retry_open_web(|| {
         let out = run(&[
             QUOTES_JS,

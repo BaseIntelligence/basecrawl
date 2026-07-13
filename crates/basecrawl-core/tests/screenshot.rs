@@ -65,6 +65,9 @@ fn png_dimensions(b64: &str) -> (u32, u32) {
 // non-zero dimensions.
 #[test]
 fn screenshot_is_decodable_png_with_nonzero_dimensions() {
+    if common::skip_public_open_web_if_hermetic("example.com screenshot decode") {
+        return;
+    }
     let v = scrape_json(&[EXAMPLE, "--formats", "screenshot"]);
     let (w, h) = png_dimensions(&screenshot_b64(&v));
     assert!(w > 0 && h > 0, "expected non-zero dimensions, got {w}x{h}");
@@ -74,6 +77,9 @@ fn screenshot_is_decodable_png_with_nonzero_dimensions() {
 // embedded timestamps / nondeterministic rendering).
 #[test]
 fn screenshot_is_deterministic_across_identical_runs() {
+    if common::skip_public_open_web_if_hermetic("example.com screenshot determinism") {
+        return;
+    }
     let a = screenshot_b64(&scrape_json(&[
         EXAMPLE,
         "--formats",
@@ -97,6 +103,9 @@ fn screenshot_is_deterministic_across_identical_runs() {
 // VAL-CRAWL-058: `--viewport 1280x800` yields an image whose width matches 1280 (DPR fixed at 1).
 #[test]
 fn requested_viewport_width_is_honored() {
+    if common::skip_public_open_web_if_hermetic("example.com screenshot viewport") {
+        return;
+    }
     let v = scrape_json(&[EXAMPLE, "--formats", "screenshot", "--viewport", "1280x800"]);
     let (w, _h) = png_dimensions(&screenshot_b64(&v));
     assert_eq!(
@@ -129,6 +138,9 @@ fn full_page_capture_exceeds_viewport_height() {
 // confirming the screenshot is outside the deterministic quorum surface.
 #[test]
 fn result_hash_is_unaffected_by_screenshot_viewport() {
+    if common::skip_public_open_web_if_hermetic("example.com screenshot result_hash") {
+        return;
+    }
     let big = scrape_json(&[
         EXAMPLE,
         "--formats",

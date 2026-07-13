@@ -180,14 +180,38 @@ fn crawler_proof_tls_and_schema_failures_cannot_become_skips() {
 }
 
 #[test]
+fn pinned_doh_timeout_is_classified_as_transient_timeout() {
+    // GHA often blocks/times out pinned DoH/DoT; that is an availability flake and must retry/skip,
+    // not panic as an unclassified local contract failure.
+    let stderr = br#"{"error":{"kind":"transport_error","message":"pinned DoH/DoT resolution failed: resolver TCP connect: connection timed out"}}"#;
+    let outcome = common::classify_open_web_process(false, b"", stderr, "nghttp2.org");
+    assert!(
+        matches!(
+            outcome,
+            common::RemoteSmokeAttempt::Retryable(common::TransientOriginFailure::Timeout)
+        ),
+        "DoH TCP connect timeouts must be transient, got {outcome:?}"
+    );
+}
+
+#[test]
 fn books_open_web_smoke_is_strict_and_bounded() {
+    // Hermetic CI (plain HTTP loopback BASECRAWL_HTTPBIN_BASE) skips public HTTPS; local / optional
+    // BASECRAWL_OPEN_WEB=1 keeps the open-web signal with transient-origin skip after retries.
+    if common::skip_public_open_web_if_hermetic("books") {
+        return;
+    }
     smoke_public_origin("books", "books.toscrape.com");
 }
 
 #[test]
 fn httpbin_open_web_smoke_is_strict_and_bounded() {
     // Named TLS authenticity smoke remains on the public TLS 1.3 mirror. Hermetic CI HTTP-semantics
-    // coverage uses BASECRAWL_HTTPBIN_BASE (plain loopback) and must not assert TLS 1.3 here.
+    // coverage uses BASECRAWL_HTTPBIN_BASE (plain loopback) and must not assert TLS 1.3 here;
+    // DoH/DoT blocks on GHA are an environment constraint, not a crawler contract failure.
+    if common::skip_public_open_web_if_hermetic("httpbin TLS 1.3 mirror") {
+        return;
+    }
     let url = format!("{}/get", common::HTTPBIN_TLS13_MIRROR);
     smoke_public_url("httpbin TLS 1.3 mirror", &url, "nghttp2.org");
 }

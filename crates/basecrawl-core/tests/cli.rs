@@ -1,7 +1,11 @@
 //! End-to-end CLI assertions for the M1 ScrapeProof envelope (VAL-CRAWL-001..012).
 //!
 //! Tests that fetch use `https://example.com`, a stable open-web target, per the mission's
-//! "real open-web targets" testing directive.
+//! "real open-web targets" testing directive. Under hermetic CI
+//! (`BASECRAWL_HTTPBIN_BASE` plain HTTP loopback) public HTTPS is skipped; set
+//! `BASECRAWL_OPEN_WEB=1` to force the open-web path.
+
+mod common;
 
 use serde_json::Value;
 use std::process::{Command, Output};
@@ -72,6 +76,9 @@ fn help_lists_url_formats_and_output_flag() {
 // VAL-CRAWL-002
 #[test]
 fn basic_fetch_emits_single_valid_json() {
+    if common::skip_public_open_web_if_hermetic("cli basic_fetch example.com") {
+        return;
+    }
     let out = run(&[TARGET, "--output", "json"]);
     assert!(
         out.status.success(),
@@ -86,6 +93,9 @@ fn basic_fetch_emits_single_valid_json() {
 // VAL-CRAWL-003
 #[test]
 fn scrapeproof_top_level_shape_is_complete() {
+    if common::skip_public_open_web_if_hermetic("cli ScrapeProof shape") {
+        return;
+    }
     let v = scrape_json(&[TARGET, "--output", "json"]);
     assert!(v["version"].is_u64(), "version must be an integer");
     for key in ["request", "tls", "response", "result", "egress"] {
@@ -96,6 +106,9 @@ fn scrapeproof_top_level_shape_is_complete() {
 // VAL-CRAWL-004
 #[test]
 fn version_equals_integer_one() {
+    if common::skip_public_open_web_if_hermetic("cli version field") {
+        return;
+    }
     let v = scrape_json(&[TARGET]);
     assert_eq!(v["version"], serde_json::json!(1));
 }
@@ -103,6 +116,9 @@ fn version_equals_integer_one() {
 // VAL-CRAWL-005
 #[test]
 fn request_url_and_method_reflect_invocation() {
+    if common::skip_public_open_web_if_hermetic("cli request url/method") {
+        return;
+    }
     let v = scrape_json(&[TARGET]);
     assert_eq!(v["request"]["method"], "GET");
     let url = v["request"]["url"].as_str().unwrap();
@@ -115,6 +131,9 @@ fn request_url_and_method_reflect_invocation() {
 // VAL-CRAWL-006
 #[test]
 fn formats_echoed_and_produced_exactly() {
+    if common::skip_public_open_web_if_hermetic("cli formats produced") {
+        return;
+    }
     let v = scrape_json(&[TARGET, "--formats", "links,markdown,metadata"]);
     let formats: Vec<&str> = v["request"]["formats"]
         .as_array()
@@ -134,6 +153,9 @@ fn formats_echoed_and_produced_exactly() {
 // VAL-CRAWL-007
 #[test]
 fn default_format_set_is_deterministic() {
+    if common::skip_public_open_web_if_hermetic("cli default formats") {
+        return;
+    }
     let a = scrape_json(&[TARGET]);
     let b = scrape_json(&[TARGET]);
     assert_eq!(
@@ -196,6 +218,9 @@ fn non_http_schemes_refused() {
 // VAL-CRAWL-011
 #[test]
 fn task_id_and_nonce_echoed_verbatim() {
+    if common::skip_public_open_web_if_hermetic("cli task_id/nonce echo") {
+        return;
+    }
     let v = scrape_json(&[TARGET, "--task-id", "T123", "--nonce", "N456"]);
     assert_eq!(v["task_id"], "T123");
     assert_eq!(v["nonce"], "N456");
@@ -204,6 +229,9 @@ fn task_id_and_nonce_echoed_verbatim() {
 // VAL-CRAWL-011
 #[test]
 fn task_id_and_nonce_omitted_when_absent() {
+    if common::skip_public_open_web_if_hermetic("cli task_id/nonce omitted") {
+        return;
+    }
     let v = scrape_json(&[TARGET]);
     let obj = v.as_object().unwrap();
     assert!(
@@ -219,6 +247,9 @@ fn task_id_and_nonce_omitted_when_absent() {
 // VAL-CRAWL-012
 #[test]
 fn attestation_and_signature_absent_or_null_at_m1() {
+    if common::skip_public_open_web_if_hermetic("cli attestation null at M1") {
+        return;
+    }
     let v = scrape_json(&[TARGET]);
     assert!(
         v["attestation"]["quote"].is_null(),
@@ -241,6 +272,9 @@ fn attestation_and_signature_absent_or_null_at_m1() {
 // VAL-TEE-026
 #[test]
 fn unavailable_dstack_socket_fails_closed_without_emitting_a_scrapeproof() {
+    if common::skip_public_open_web_if_hermetic("cli dstack socket fail-closed") {
+        return;
+    }
     let out = run(&[
         TARGET,
         "--formats",
