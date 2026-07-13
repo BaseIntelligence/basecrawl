@@ -71,6 +71,7 @@ fn sample_proof_for_seed(seed: &str, cert_chain_hash: &str, transcript_hash: &st
             timestamp: Some("2026-07-12T00:00:00Z".into()),
             fingerprint_seed: Some(seed.to_string()),
             proxy_class: None,
+            fetch_path: None,
         },
         attestation: Attestation::default(),
         sdk_signature: SdkSignature {

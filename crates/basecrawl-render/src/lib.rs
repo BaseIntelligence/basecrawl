@@ -226,6 +226,17 @@ pub struct RenderConfig {
     /// proxy is used (VAL-CONF-013 default). The Arc keeps the accept loop alive for the whole
     /// render/screenshot lifetime (VAL-PROXY-015..019/022).
     pub sealed_socks: Option<Arc<basecrawl_seal::SealedSocksProxy>>,
+    /// Sticky Chromium profile directory for multipage cookie continuity on one task
+    /// (VAL-STEALTH-011). When `None`, a fresh temp profile is used and wiped on browser exit.
+    pub user_data_dir: Option<PathBuf>,
+    /// Enable the hard-path stealth launch baseline: drop `--enable-automation`, disable the
+    /// AutomationControlled blink feature, and (via injection) force `navigator.webdriver` false.
+    /// This is a success-rate baseline under TDX, not an "undetectable" claim.
+    pub stealth: bool,
+    /// Full Chrome version for Client Hints metadata (aligned with pinned Chromium / UA).
+    pub chrome_full_version: Option<String>,
+    /// Chrome major version used for `Sec-CH-UA` brand list (VAL-STEALTH-003/006).
+    pub chrome_major: Option<u32>,
 }
 
 impl Default for RenderConfig {
@@ -258,6 +269,10 @@ impl Default for RenderConfig {
             fingerprint_script: None,
             window_size: None,
             sealed_socks: None,
+            user_data_dir: None,
+            stealth: true,
+            chrome_full_version: None,
+            chrome_major: None,
         }
     }
 }
@@ -1030,11 +1045,67 @@ fn declared_content_length(headers: &[Fetch::HeaderEntry]) -> Option<u64> {
 /// composer instance. Chromium hands hostnames to the SOCKS proxy (ATYP=domain) rather than the
 /// host stub for navigated origins. If the sealed/composer SOCKS path cannot be established,
 /// launch fails closed with [`RenderError::DnsIsolation`] and no Chromium target is created.
+/// Extra Chromium argv used on every hard-path stealth launch (VAL-STEALTH-004).
+///
+/// Static storage so `LaunchOptions` can borrow `&OsStr` for the launch duration.
+const STEALTH_EXTRA_ARGS: &[&str] = &[
+    "--disable-blink-features=AutomationControlled",
+    "--disable-infobars",
+    "--no-default-browser-check",
+    "--disable-session-crashed-bubble",
+    "--disable-features=InfiniteSessionRestore",
+];
+
+/// Remove Chromium session restore artifacts so sticky-profile relaunches honor the requested URL.
+/// Cookie / local storage files are intentionally preserved (VAL-STEALTH-011).
+fn sanitize_sticky_profile_for_relaunch(dir: &std::path::Path) {
+    for rel in [
+        "Default/Sessions",
+        "Default/Session Storage",
+        "Default/Current Session",
+        "Default/Current Tabs",
+        "Default/Last Session",
+        "Default/Last Tabs",
+        "Default/Preferences.bak",
+    ] {
+        let path = dir.join(rel);
+        if path.is_dir() {
+            let _ = std::fs::remove_dir_all(&path);
+        } else if path.is_file() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    // Prefer not restoring on crash; Preferences is JSON – best-effort strip of session restore.
+    let prefs = dir.join("Default/Preferences");
+    if prefs.is_file() {
+        if let Ok(raw) = std::fs::read_to_string(&prefs) {
+            if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(obj) = value.as_object_mut() {
+                    if let Some(session) = obj.get_mut("session").and_then(|v| v.as_object_mut()) {
+                        session.insert(
+                            "restore_on_startup".to_string(),
+                            serde_json::Value::Number(5.into()),
+                        );
+                    }
+                }
+                if let Ok(rewritten) = serde_json::to_string(&value) {
+                    let _ = std::fs::write(&prefs, rewritten);
+                }
+            }
+        }
+    }
+}
+
+/// Default args overridden/ignored so automation is not advertised on the hard path.
+const STEALTH_IGNORE_DEFAULT_ARGS: &[&str] = &["--enable-automation"];
+
 fn launch_browser(
     deadline: Instant,
     timeout: Duration,
     window_size: (u32, u32),
     sealed_socks: Option<&Arc<basecrawl_seal::SealedSocksProxy>>,
+    user_data_dir: Option<&PathBuf>,
+    stealth: bool,
 ) -> Result<Browser, RenderError> {
     let chrome = resolve_chrome().ok_or(RenderError::ChromeNotFound)?;
     // Owned String: LaunchOptions takes `&str` for proxy_server but we must keep storage alive
@@ -1068,14 +1139,38 @@ fn launch_browser(
     if !composed {
         args.push(OsStr::new("--proxy-bypass-list=127.0.0.1;localhost;::1"));
     }
-    let options = LaunchOptions::default_builder()
+    if stealth {
+        for flag in STEALTH_EXTRA_ARGS {
+            args.push(OsStr::new(flag));
+        }
+    }
+    let ignore_default: Vec<&OsStr> = if stealth {
+        STEALTH_IGNORE_DEFAULT_ARGS
+            .iter()
+            .map(|flag| OsStr::new(*flag))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut builder = LaunchOptions::default_builder();
+    builder
         .path(Some(chrome))
         .headless(true)
         .sandbox(false)
         .window_size(Some(window_size))
         .proxy_server(Some(proxy_server.as_str()))
         .args(args)
-        .idle_browser_timeout(remaining(deadline, timeout)?)
+        .ignore_default_args(ignore_default)
+        .idle_browser_timeout(remaining(deadline, timeout)?);
+    if let Some(dir) = user_data_dir {
+        // Sticky profile: preserve cookies/storage for multipage/actions on one task
+        // (VAL-STEALTH-011). Cross-task wipe is the caller's responsibility (VAL-STEALTH-013).
+        // Drop session-restore files so a new launch navigates to the requested URL instead of
+        // reopening the previous tab, while keeping cookie jars intact.
+        sanitize_sticky_profile_for_relaunch(dir);
+        builder.user_data_dir(Some(dir.clone()));
+    }
+    let options = builder
         .build()
         .map_err(|error| RenderError::Launch(error.to_string()))?;
 
@@ -1131,6 +1226,95 @@ fn preflight_sealed_document_dns(
             ))
         })?;
     }
+    Ok(())
+}
+
+/// Apply UA + Client Hints metadata so hard-path identity is Chromium-coherent (VAL-STEALTH-003/006).
+///
+/// `userAgentMetadata` must be set for Chromium to emit `Sec-CH-UA` Client Hint headers.
+fn apply_user_agent_override(
+    tab: &Arc<Tab>,
+    user_agent: &str,
+    accept_language: Option<&str>,
+    platform: Option<&str>,
+    chrome_major: Option<u32>,
+    chrome_full_version: Option<&str>,
+) -> Result<(), RenderError> {
+    let major = chrome_major
+        .map(|value| value.to_string())
+        .or_else(|| {
+            user_agent.split("Chrome/").nth(1).and_then(|rest| {
+                let end = rest
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(rest.len());
+                rest.get(..end).map(str::to_string)
+            })
+        })
+        .unwrap_or_else(|| "145".to_string());
+    let full_version = chrome_full_version
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{major}.0.0.0"));
+    let ch_platform = match platform.unwrap_or("Linux x86_64") {
+        p if p.starts_with("Win") => "Windows",
+        p if p.starts_with("Mac") => "macOS",
+        _ => "Linux",
+    };
+    let brands = vec![
+        Emulation::UserAgentBrandVersion {
+            brand: "Not:A-Brand".to_string(),
+            version: "99".to_string(),
+        },
+        Emulation::UserAgentBrandVersion {
+            brand: "Google Chrome".to_string(),
+            version: major.clone(),
+        },
+        Emulation::UserAgentBrandVersion {
+            brand: "Chromium".to_string(),
+            version: major.clone(),
+        },
+    ];
+    let metadata = Emulation::UserAgentMetadata {
+        brands: Some(brands.clone()),
+        full_version_list: Some(vec![
+            Emulation::UserAgentBrandVersion {
+                brand: "Not:A-Brand".to_string(),
+                version: "10.0.1.4".to_string(),
+            },
+            Emulation::UserAgentBrandVersion {
+                brand: "Google Chrome".to_string(),
+                version: full_version.clone(),
+            },
+            Emulation::UserAgentBrandVersion {
+                brand: "Chromium".to_string(),
+                version: full_version.clone(),
+            },
+        ]),
+        full_version: Some(full_version),
+        platform: ch_platform.to_string(),
+        platform_version: String::new(),
+        architecture: "x86".to_string(),
+        model: String::new(),
+        mobile: false,
+        bitness: Some("64".to_string()),
+        wow_64: Some(false),
+        form_factors: Some(vec!["Desktop".to_string()]),
+    };
+    // Prefer Emulation (covers both navigator.userAgent + CH) then Network for header emission.
+    tab.call_method(Emulation::SetUserAgentOverride {
+        user_agent: user_agent.to_string(),
+        accept_language: accept_language.map(str::to_string),
+        platform: platform.map(str::to_string),
+        user_agent_metadata: Some(metadata.clone()),
+    })
+    .map_err(|e| RenderError::Render(e.to_string()))?;
+    tab.call_method(Network::SetUserAgentOverride {
+        user_agent: user_agent.to_string(),
+        accept_language: accept_language.map(str::to_string),
+        platform: platform.map(str::to_string),
+        user_agent_metadata: Some(metadata),
+    })
+    .map_err(|e| RenderError::Render(e.to_string()))?;
+    let _ = brands;
     Ok(())
 }
 
@@ -1361,6 +1545,8 @@ pub fn render_until(
         config.timeout,
         window_size,
         config.sealed_socks.as_ref(),
+        config.user_data_dir.as_ref(),
+        config.stealth,
     )?;
     let tab = browser
         .new_tab()
@@ -1372,12 +1558,14 @@ pub fn render_until(
     set_tab_deadline(&tab, deadline, config.timeout)?;
     if !config.user_agent.is_empty() {
         set_tab_deadline(&tab, deadline, config.timeout)?;
-        tab.set_user_agent(
+        apply_user_agent_override(
+            &tab,
             &config.user_agent,
             config.accept_language.as_deref(),
             config.platform.as_deref(),
-        )
-        .map_err(|e| RenderError::Render(e.to_string()))?;
+            config.chrome_major,
+            config.chrome_full_version.as_deref(),
+        )?;
     }
     apply_emulation_overrides(
         &tab,
@@ -1804,6 +1992,14 @@ pub struct ScreenshotConfig {
     /// Optional sealed SOCKS / DoH-preserving composer for this capture (same semantics as
     /// [`RenderConfig::sealed_socks`]).
     pub sealed_socks: Option<Arc<basecrawl_seal::SealedSocksProxy>>,
+    /// Sticky Chromium profile directory for multipage cookie continuity (VAL-STEALTH-011).
+    pub user_data_dir: Option<PathBuf>,
+    /// Hard-path stealth launch baseline (see [`RenderConfig::stealth`]).
+    pub stealth: bool,
+    /// Full Chrome version for Client Hints metadata.
+    pub chrome_full_version: Option<String>,
+    /// Chrome major for `Sec-CH-UA`.
+    pub chrome_major: Option<u32>,
 }
 
 impl Default for ScreenshotConfig {
@@ -1829,6 +2025,10 @@ impl Default for ScreenshotConfig {
             locale: None,
             fingerprint_script: None,
             sealed_socks: None,
+            user_data_dir: None,
+            stealth: true,
+            chrome_full_version: None,
+            chrome_major: None,
         }
     }
 }
@@ -1892,6 +2092,8 @@ pub fn screenshot_until(
         config.timeout,
         (config.width, config.height),
         config.sealed_socks.as_ref(),
+        config.user_data_dir.as_ref(),
+        config.stealth,
     )?;
     let tab = browser
         .new_tab()
@@ -1900,12 +2102,14 @@ pub fn screenshot_until(
     set_tab_deadline(&tab, deadline, config.timeout)?;
     if !config.user_agent.is_empty() {
         set_tab_deadline(&tab, deadline, config.timeout)?;
-        tab.set_user_agent(
+        apply_user_agent_override(
+            &tab,
             &config.user_agent,
             config.accept_language.as_deref(),
             config.platform.as_deref(),
-        )
-        .map_err(|e| RenderError::Render(e.to_string()))?;
+            config.chrome_major,
+            config.chrome_full_version.as_deref(),
+        )?;
     }
     apply_emulation_overrides(
         &tab,

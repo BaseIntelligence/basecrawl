@@ -34,17 +34,50 @@ const WEBGL_DOMAIN_TAG: &[u8] = b"basecrawl/webgl-fp/v1\0";
 // Declared / bounded parameter space (allowlisted choices the seed indexes into)
 // ---------------------------------------------------------------------------
 
+/// Product Chromium pin from the digest-pinned CVM image (`image/Dockerfile` `CHROMIUM_VERSION`).
+/// Client-Hints / UA major remain coherent with this pin under TDX; host diagnostics may use a
+/// neighboring Chrome major when the local binary differs (never a non-Chrome brand).
+pub const PINNED_CHROMIUM_VERSION: &str = "145.0.7632.46";
+
+/// Major version of the product-pinned Chromium (VAL-STEALTH-003/006).
+pub const PINNED_CHROMIUM_MAJOR: u32 = 145;
+
+/// Full product Chromium version string (env `CHROMIUM_VERSION` overrides for operator diagnostics).
+pub fn product_chromium_version() -> String {
+    std::env::var("CHROMIUM_VERSION")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| PINNED_CHROMIUM_VERSION.to_string())
+}
+
+/// Major component of [`product_chromium_version`].
+pub fn product_chromium_major() -> u32 {
+    product_chromium_version()
+        .split('.')
+        .next()
+        .and_then(|part| part.parse().ok())
+        .unwrap_or(PINNED_CHROMIUM_MAJOR)
+}
+
 /// Chrome User-Agents allowed by the measured image (version cluster stays near the pinned browser).
+///
+/// Majors center on the product pin (145) and the adjacent measured host Chrome builds actually
+/// observed in the operator fleet. Soft-path rustls and hard-path Chromium must never claim a
+/// non-Chrome brand.
 pub const USER_AGENTS: &[&str] = &[
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
 ];
+
+/// Plausible hardwareConcurrency values the seed may legalize (VAL-STEALTH-009).
+pub const HARDWARE_CONCURRENCY: &[u32] = &[2, 4, 6, 8, 12, 16];
 
 /// Viewport dimensions (CSS px @ device-scale-factor 1) the seed may legalize.
 pub const VIEWPORTS: &[(u32, u32)] = &[
@@ -176,6 +209,12 @@ pub struct FingerprintProfile {
     pub ja4: String,
     /// Platform token for CDP `set_user_agent` (derived from the UA string).
     pub platform: String,
+    /// Positive `navigator.hardwareConcurrency` value (VAL-STEALTH-009).
+    pub hardware_concurrency: u32,
+    /// Chrome major version extracted from `user_agent` (coherent with CH-UA).
+    pub chrome_major: u32,
+    /// Full Chrome version string used for Client Hints (`Sec-CH-UA-Full-Version-List`).
+    pub chrome_full_version: String,
 }
 
 /// Static description of the declared parameter space (for audits / VAL-ANTIBOT-037).
@@ -298,6 +337,8 @@ pub fn generate(seed_input: &str) -> FingerprintProfile {
     let webgl_renderer = WEBGL_RENDERERS[webgl_idx].to_string();
     let webgl_vendor = WEBGL_VENDORS[webgl_idx].to_string();
     let canvas_noise = stream.lane(8).next_u64();
+    let hardware_concurrency = *pick(&stream.lane(9), HARDWARE_CONCURRENCY);
+    let (chrome_major, chrome_full_version) = chrome_versions_for_ua(&user_agent);
 
     let accept_language = accept_language_for(&locale);
     let accept =
@@ -333,6 +374,9 @@ pub fn generate(seed_input: &str) -> FingerprintProfile {
         ja3,
         ja4,
         platform,
+        hardware_concurrency,
+        chrome_major,
+        chrome_full_version,
     }
 }
 
@@ -378,6 +422,11 @@ pub fn is_within_parameter_space(profile: &FingerprintProfile) -> bool {
             .all(|g| TLS_GROUPS.contains(&g.as_str()))
         && WEBGL_RENDERERS.contains(&profile.webgl_renderer.as_str())
         && WEBGL_VENDORS.contains(&profile.webgl_vendor.as_str())
+        && HARDWARE_CONCURRENCY.contains(&profile.hardware_concurrency)
+        && profile.hardware_concurrency > 0
+        && profile.chrome_major > 0
+        && chrome_versions_for_ua(&profile.user_agent)
+            == (profile.chrome_major, profile.chrome_full_version.clone())
         && is_hex64(&profile.seed)
         && is_hex64(&profile.ja3)
         && is_hex64(&profile.ja4)
@@ -424,8 +473,13 @@ pub fn effective_fingerprint_headers(
 }
 
 /// Produce a JS snippet injected via CDP `Page.addScriptToEvaluateOnNewDocument` that:
+/// - forces `navigator.webdriver` false (VAL-STEALTH-004)
 /// - pins `navigator.language` / `navigator.languages` to the profile locale
+/// - pins a positive `navigator.hardwareConcurrency` (VAL-STEALTH-009)
 /// - injects canvas `/` WebGL noise so rendering fingerprints differ per seed
+///
+/// This is a baseline hard-path identity surface under TDX; it does **not** claim an undetectable
+/// or universal bot-defeat posture.
 pub fn browser_injection_script(profile: &FingerprintProfile) -> String {
     let locale = serde_json::to_string(&profile.locale).unwrap_or_else(|_| "\"en-US\"".into());
     let short_locale = profile.locale.split('-').next().unwrap_or("en");
@@ -435,14 +489,40 @@ pub fn browser_injection_script(profile: &FingerprintProfile) -> String {
     let renderer =
         serde_json::to_string(&profile.webgl_renderer).unwrap_or_else(|_| "\"ANGLE\"".into());
     let noise = profile.canvas_noise;
+    let hardware = profile.hardware_concurrency.max(1);
+    let platform =
+        serde_json::to_string(&profile.platform).unwrap_or_else(|_| "\"Linux x86_64\"".into());
     format!(
         r#"(function() {{
   const locale = {locale};
   const shortLocale = {short_locale_json};
+  const hardwareConcurrency = {hardware};
+  const platform = {platform};
+  try {{
+    Object.defineProperty(Navigator.prototype, 'webdriver', {{
+      get: () => false,
+      configurable: true
+    }});
+  }} catch (_) {{}}
+  try {{
+    if (navigator.webdriver) {{
+      Object.defineProperty(navigator, 'webdriver', {{ get: () => false, configurable: true }});
+    }}
+  }} catch (_) {{}}
   try {{
     Object.defineProperty(Navigator.prototype, 'language', {{ get: () => locale }});
     Object.defineProperty(Navigator.prototype, 'languages', {{
       get: () => Object.freeze([locale, shortLocale])
+    }});
+    Object.defineProperty(Navigator.prototype, 'hardwareConcurrency', {{
+      get: () => hardwareConcurrency
+    }});
+    Object.defineProperty(Navigator.prototype, 'platform', {{ get: () => platform }});
+    Object.defineProperty(Navigator.prototype, 'plugins', {{
+      get: () => {{
+        const fake = {{ length: 1, 0: {{ name: 'PDF Viewer' }}, item: function() {{ return this[0]; }} }};
+        return fake;
+      }}
     }});
   }} catch (_) {{}}
 
@@ -488,7 +568,67 @@ pub fn browser_injection_script(profile: &FingerprintProfile) -> String {
         noise = noise,
         vendor = vendor,
         renderer = renderer,
+        hardware = hardware,
+        platform = platform,
     )
+}
+
+/// Brand list + full version for CDP `userAgentMetadata` / `Sec-CH-UA` (VAL-STEALTH-003/006).
+pub fn client_hints_brands(profile: &FingerprintProfile) -> Vec<(String, String)> {
+    let major = profile.chrome_major.to_string();
+    vec![
+        ("Not:A-Brand".to_string(), "99".to_string()),
+        ("Google Chrome".to_string(), major.clone()),
+        ("Chromium".to_string(), major),
+    ]
+}
+
+/// Serialize client-hints brands in the wire form Chromium uses for `Sec-CH-UA`.
+pub fn sec_ch_ua_header(profile: &FingerprintProfile) -> String {
+    client_hints_brands(profile)
+        .into_iter()
+        .map(|(brand, version)| format!("\"{brand}\";v=\"{version}\""))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// High-level platform family for Client Hints (`Sec-CH-UA-Platform`).
+pub fn client_hints_platform(profile: &FingerprintProfile) -> &'static str {
+    if profile.platform.starts_with("Win") {
+        "Windows"
+    } else if profile.platform.starts_with("Mac") {
+        "macOS"
+    } else {
+        "Linux"
+    }
+}
+
+/// Architecture token for Client Hints.
+pub fn client_hints_architecture(_profile: &FingerprintProfile) -> &'static str {
+    // Current allowlisted platforms are all desktop x86_64.
+    "x86"
+}
+
+fn chrome_versions_for_ua(user_agent: &str) -> (u32, String) {
+    let major = user_agent
+        .split("Chrome/")
+        .nth(1)
+        .and_then(|rest| {
+            let end = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len());
+            rest.get(..end)
+        })
+        .and_then(|part| part.parse::<u32>().ok())
+        .unwrap_or(product_chromium_major());
+    // Prefer the product pin's full version when the UA major matches the pin, so hard-path
+    // Client Hints align with the measured image. Neighboring majors keep a major.0.0.0 fall-back.
+    let full = if major == PINNED_CHROMIUM_MAJOR {
+        product_chromium_version()
+    } else {
+        format!("{major}.0.0.0")
+    };
+    (major, full)
 }
 
 // ---------------------------------------------------------------------------
@@ -891,5 +1031,20 @@ mod tests {
         assert!(script.contains("UNMASKED_RENDERER_WEBGL"));
         assert!(script.contains(&profile.webgl_renderer));
         assert!(script.contains("language"));
+        assert!(script.contains("webdriver"));
+        assert!(script.contains("hardwareConcurrency"));
+        assert!(script.contains(&profile.hardware_concurrency.to_string()));
+    }
+
+    #[test]
+    fn product_chromium_pin_is_coherent() {
+        assert_eq!(PINNED_CHROMIUM_MAJOR, 145);
+        assert!(product_chromium_version().starts_with("145."));
+        let profile = generate("pin-coherent");
+        assert!(profile.chrome_major == 145 || profile.chrome_major == 148);
+        let ch = sec_ch_ua_header(&profile);
+        assert!(ch.contains("Google Chrome"));
+        assert!(ch.contains(&format!("v=\"{}\"", profile.chrome_major)));
+        assert!(!ch.to_lowercase().contains("curl"));
     }
 }

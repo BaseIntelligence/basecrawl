@@ -91,6 +91,7 @@ fn attestation_proof_with_pubkey(pubkey_hex: &str) -> basecrawl_proof::ScrapePro
             timestamp: Some("2026-07-12T12:34:56Z".into()),
             fingerprint_seed: Some("bb".repeat(32)),
             proxy_class: None,
+            fetch_path: None,
         },
         attestation: Attestation::default(),
         sdk_signature: SdkSignature {
@@ -305,6 +306,7 @@ fn val_geo_009_build_egress_includes_landmark_rtts() {
         &"cc".repeat(32),
         map.clone(),
         basecrawl_proof::ProxyClass::Direct,
+        basecrawl_proof::FetchPath::Direct,
     )
     .expect("egress");
     assert_eq!(egress.landmark_rtts, map);

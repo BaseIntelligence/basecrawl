@@ -191,8 +191,24 @@ struct Cli {
     /// Required/declared proxy class: `direct|datacenter|residential|mobile`.
     /// Commercial classes without a viable upstream fail closed (no forged success proof).
     /// Emitted `egress.proxy_class` always reflects the actual dial path.
+    /// Residential|mobile force the hard Chromium identity path (VAL-STEALTH-001).
     #[arg(long = "proxy-class", value_name = "CLASS")]
     proxy_class: Option<String>,
+
+    /// Site difficulty: `soft` (default behaviour) or `hard` (force Chromium stealth identity).
+    /// Hard difficulty never falls back to a dual-stack soft-only identity.
+    #[arg(long = "difficulty", value_name = "LEVEL")]
+    difficulty: Option<String>,
+
+    /// Force the hard Chromium path (stealth baseline + sticky profile) even for soft classes.
+    /// Baseline identity improvements only; not a guarantee against every bot vendor.
+    #[arg(long = "force-browser", default_value_t = false)]
+    force_browser: bool,
+
+    /// Keep the sticky Chromium profile on disk after the scrape (default: wipe on completion so
+    /// the next task_id starts clean without operator process surgery).
+    #[arg(long = "keep-browser-profile", default_value_t = false)]
+    keep_browser_profile: bool,
 }
 
 fn run(cli: Cli) -> Result<String, Error> {
@@ -271,6 +287,17 @@ fn run(cli: Cli) -> Result<String, Error> {
         })?),
     };
 
+    let difficulty = match cli.difficulty.as_deref() {
+        None => None,
+        Some(raw) => Some(
+            basecrawl_core::stealth::SiteDifficulty::parse(raw).ok_or_else(|| {
+                Error::HardPath(format!(
+                    "unknown difficulty '{raw}' (supported: soft, hard)"
+                ))
+            })?,
+        ),
+    };
+
     let options = ScrapeOptions {
         formats,
         task_id: cli.task_id,
@@ -302,6 +329,9 @@ fn run(cli: Cli) -> Result<String, Error> {
         proxy_country: cli.proxy_country,
         proxy_username_template: cli.proxy_username_template,
         proxy_class,
+        difficulty,
+        force_browser: cli.force_browser,
+        wipe_profile_on_complete: !cli.keep_browser_profile,
     };
 
     let proof = scrape(&raw_url, &options)?;

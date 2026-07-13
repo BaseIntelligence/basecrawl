@@ -24,6 +24,7 @@ pub mod proxy;
 pub mod robots;
 pub mod rtt_echo;
 pub mod screenshot;
+pub mod stealth;
 pub mod url_validation;
 
 use basecrawl_proof::{
@@ -134,6 +135,14 @@ pub struct ScrapeOptions {
     /// Commercial class without a viable upstream fails closed (VAL-PROXY-020/021/028).
     /// Emitted `egress.proxy_class` is always the truthful dial class, never a forged wish.
     pub proxy_class: Option<basecrawl_proof::ProxyClass>,
+    /// Optional site difficulty (`soft|hard`). Hard forces the Chromium identity path
+    /// (VAL-STEALTH-001) even without a residential proxy class.
+    pub difficulty: Option<stealth::SiteDifficulty>,
+    /// Explicitly force the hard Chromium path (sticky stealth identity), even for soft targets.
+    pub force_browser: bool,
+    /// When true (default), wipe the sticky Chromium profile when the scrape ends so the next
+    /// distinct task_id starts clean without operator process surgery (VAL-STEALTH-014).
+    pub wipe_profile_on_complete: bool,
 }
 
 impl Default for ScrapeOptions {
@@ -170,6 +179,9 @@ impl Default for ScrapeOptions {
             proxy_country: None,
             proxy_username_template: None,
             proxy_class: None,
+            difficulty: None,
+            force_browser: false,
+            wipe_profile_on_complete: true,
         }
     }
 }
@@ -259,16 +271,46 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
     };
     let proxy = proxy::resolve_proxy_plan(&proxy_plan, &url)?;
     let dialed_proxy_class = proxy::truthful_proxy_class(proxy.as_ref(), options.proxy_class)?;
+    // Hard / residential identity policy (VAL-STEALTH-001/002/010/017):
+    // residential|mobile or hard difficulty force the Chromium path; soft targets may stay rustls.
+    let needs_browser_formats = formats
+        .iter()
+        .any(|f| matches!(f, Format::Screenshot | Format::Markdown | Format::Html))
+        || options.follow_pagination;
+    let hard_decision = stealth::HardPathDecision {
+        proxy_class: options.proxy_class.or(Some(dialed_proxy_class)),
+        difficulty: options.difficulty,
+        force_browser: options.force_browser,
+        render_enabled: options.render_enabled,
+        needs_browser_formats,
+    };
+    let hard_required = stealth::requires_chromium_hard_path(hard_decision);
+    let will_use_browser = stealth::will_launch_chromium(hard_decision, hard_required).map_err(
+        |error| match error {
+            stealth::StealthPolicyError::HardPathDisabled { reason } => Error::HardPath(reason),
+            stealth::StealthPolicyError::Profile(detail) => Error::HardPath(detail),
+        },
+    )?;
+    // Sticky profile for multipage cookie continuity on one task; wiped across task_ids
+    // (VAL-STEALTH-011..014). Soft-only scrapes skip an empty profile.
+    let sticky_profile_dir = if will_use_browser {
+        let key = options
+            .task_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or(options.proxy_session.as_deref())
+            .unwrap_or("anonymous");
+        Some(
+            stealth::acquire_sticky_profile(key)
+                .map_err(|error| Error::HardPath(error.to_string()))?,
+        )
+    } else {
+        None
+    };
     // Chromium hard path shares the soft-path dialer via a DoH-preserving composer
     // (VAL-PROXY-012/015..019). Only start when the scrape will launch headless Chromium so soft
     // --no-js paths stay cheap. Bind/start failures under a required commercial class fail closed
     // before any Chromium target is created (VAL-PROXY-022).
-    let will_use_browser = formats.iter().any(|f| matches!(f, Format::Screenshot))
-        || (options.render_enabled
-            && (formats
-                .iter()
-                .any(|f| matches!(f, Format::Markdown | Format::Html))
-                || options.follow_pagination));
     let chromium_composer = if will_use_browser {
         match proxy.as_ref() {
             Some(cfg) => Some(proxy::start_chromium_composer(cfg)?),
@@ -354,11 +396,28 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
         options.max_render_subresources,
         options.max_render_bytes,
     );
-    let rendered_html: Option<String> = if options.render_enabled
-        && needs_render
-        && content_kind == ContentKind::Html
+    // Hard path always drives Chromium for HTML identity (VAL-STEALTH-001/003). Soft path keeps
+    // the previous "render only when html/markdown requested" rule.
+    let should_render_html = content_kind == ContentKind::Html
         && !body_str.trim().is_empty()
-    {
+        && (hard_required || (options.render_enabled && needs_render));
+    // Refuse hard-path silent success when the origin already returned a classic challenge page
+    // before Chromium rolls (VAL-STEALTH-016). Still fail closed if the rendered DOM is a block page.
+    if hard_required && stealth::looks_like_challenge_interstitial(&body_str, fetched.status_code) {
+        if options.wipe_profile_on_complete {
+            if let Some(key) = options.task_id.as_deref().filter(|s| !s.is_empty()) {
+                let _ = stealth::wipe_sticky_profile(key);
+            } else {
+                let _ = stealth::wipe_current_sticky_profile();
+            }
+        }
+        return Err(Error::ChallengeBlocked {
+            status_code: fetched.status_code,
+            detail: "hard path observed a bot-challenge / block response (VAL-STEALTH-016)".into(),
+        });
+    }
+    let mut chromium_used = false;
+    let rendered_html: Option<String> = if should_render_html {
         let mut rendered = html::render_page_until(
             &page_base,
             basecrawl_render::RenderConfig {
@@ -383,13 +442,51 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
                 fingerprint_script: Some(basecrawl_fp::browser_injection_script(&fingerprint)),
                 window_size: Some((fingerprint.viewport_width, fingerprint.viewport_height)),
                 sealed_socks: chromium_composer.clone(),
+                user_data_dir: sticky_profile_dir.clone(),
+                stealth: true,
+                chrome_full_version: Some(fingerprint.chrome_full_version.clone()),
+                chrome_major: Some(fingerprint.chrome_major),
                 ..basecrawl_render::RenderConfig::default()
             },
             deadline,
         )?;
         redact_sensitive_request_echoes(&mut rendered.html, &options.headers);
+        // Hard path: refuse to silently score a challenge interstitial as primary success.
+        if hard_required
+            && stealth::looks_like_challenge_interstitial(&rendered.html, fetched.status_code)
+        {
+            if options.wipe_profile_on_complete {
+                if let Some(key) = options.task_id.as_deref().filter(|s| !s.is_empty()) {
+                    let _ = stealth::wipe_sticky_profile(key);
+                } else {
+                    let _ = stealth::wipe_current_sticky_profile();
+                }
+            }
+            return Err(Error::ChallengeBlocked {
+                status_code: fetched.status_code,
+                detail: "hard path observed a bot-challenge / block interstitial rather than the primary document (VAL-STEALTH-016)".into(),
+            });
+        }
+        chromium_used = true;
         Some(rendered.html)
     } else {
+        // Soft-path non-render HTML may still be challenge-like; only hard tasks gate on it.
+        if hard_required
+            && stealth::looks_like_challenge_interstitial(&body_str, fetched.status_code)
+        {
+            if options.wipe_profile_on_complete {
+                if let Some(key) = options.task_id.as_deref().filter(|s| !s.is_empty()) {
+                    let _ = stealth::wipe_sticky_profile(key);
+                } else {
+                    let _ = stealth::wipe_current_sticky_profile();
+                }
+            }
+            return Err(Error::ChallengeBlocked {
+                status_code: fetched.status_code,
+                detail: "hard path observed a bot-challenge / block response (VAL-STEALTH-016)"
+                    .into(),
+            });
+        }
         None
     };
 
@@ -463,9 +560,14 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
                             &fingerprint,
                         )),
                         sealed_socks: chromium_composer.clone(),
+                        user_data_dir: sticky_profile_dir.clone(),
+                        stealth: true,
+                        chrome_full_version: Some(fingerprint.chrome_full_version.clone()),
+                        chrome_major: Some(fingerprint.chrome_major),
                     },
                     deadline,
                 )?;
+                chromium_used = true;
                 Value::String(shot.base64)
             }
             _ => Value::Null,
@@ -510,6 +612,7 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
                 render_resource_budget.clone(),
                 &fingerprint,
                 chromium_composer.clone(),
+                sticky_profile_dir.clone(),
                 deadline,
             )?;
             if let Some(agg) = aggregated_markdown.as_mut() {
@@ -543,6 +646,27 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
     let completeness_manifest = canonical::completeness_manifest(&format_names, &formats_produced);
     let manifest_sha256 =
         canonical::manifest_sha256(url.as_str(), options.nonce.as_deref(), &result_hash);
+    // Truthful path marker: hard/residential HTML targets must not claim soft-only identity
+    // (VAL-STEALTH-010). Non-HTML soft fixtures still report the actual wire path used.
+    let fetch_path = stealth::truthful_fetch_path(
+        chromium_used || (hard_required && will_use_browser && content_kind == ContentKind::Html),
+    );
+    if hard_required
+        && content_kind == ContentKind::Html
+        && fetch_path != basecrawl_proof::FetchPath::Chromium
+    {
+        if options.wipe_profile_on_complete {
+            if let Some(key) = options.task_id.as_deref().filter(|s| !s.is_empty()) {
+                let _ = stealth::wipe_sticky_profile(key);
+            } else {
+                let _ = stealth::wipe_current_sticky_profile();
+            }
+        }
+        return Err(Error::HardPath(
+            "hard/residential request completed without a Chromium identity (dual-stack mismatch)"
+                .into(),
+        ));
+    }
     let egress = match &options.landmark_rtts {
         Some(rtts) => egress::build_with_landmark_rtts(
             fetched.egress_ip,
@@ -550,6 +674,7 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
             &fingerprint.seed,
             rtts.clone(),
             dialed_proxy_class,
+            fetch_path,
         )?,
         None => egress::build_with_landmark_rtts(
             fetched.egress_ip,
@@ -557,6 +682,7 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
             &fingerprint.seed,
             std::collections::BTreeMap::new(),
             dialed_proxy_class,
+            fetch_path,
         )?,
     };
 
@@ -605,6 +731,21 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
             "signed proofs require attestation".to_string(),
         ));
     }
+    if options.wipe_profile_on_complete {
+        // Task ends → wipe sticky jar so the next task_id starts clean (VAL-STEALTH-013/014).
+        // Browser process itself is already Drop-killed by the render crate.
+        if let Some(key) = options
+            .task_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or(options.proxy_session.as_deref())
+        {
+            let _ = stealth::wipe_sticky_profile(key);
+        } else {
+            let _ = stealth::wipe_current_sticky_profile();
+        }
+    }
+
     if options.attest {
         // Every M2 quote carries the enclave key commitment and signature. The explicit option
         // remains useful to SDK callers as an intent marker, but cannot disable this invariant.
@@ -685,7 +826,9 @@ fn materialize_robots_policy_hops(
 ///
 /// When the scrape has a commercial/mock upstream, `chromium_composer` is the same sticky dialer
 /// handle used by the first-page/browser actions so multipage stays on one exit hop (VAL-PROXY-012).
-#[allow(clippy::too_many_arguments)] // scrape-owned composer must share sticky dial with page-1
+/// `sticky_profile_dir` is the same Chromium user-data dir so cookies/session persist across
+/// multipage hops on one task (VAL-STEALTH-011).
+#[allow(clippy::too_many_arguments)] // scrape-owned composer + sticky profile must share page-1
 fn crawl_page(
     url: &Url,
     options: &ScrapeOptions,
@@ -694,6 +837,7 @@ fn crawl_page(
     render_resource_budget: basecrawl_render::RenderResourceBudget,
     fingerprint: &basecrawl_fp::FingerprintProfile,
     chromium_composer: Option<std::sync::Arc<basecrawl_seal::SealedSocksProxy>>,
+    sticky_profile_dir: Option<std::path::PathBuf>,
     deadline: Instant,
 ) -> Result<(String, String, Url), Error> {
     let fetched = fetch::fetch_document_until(url, config, deadline, |target| {
@@ -728,6 +872,10 @@ fn crawl_page(
                 fingerprint_script: Some(basecrawl_fp::browser_injection_script(fingerprint)),
                 window_size: Some((fingerprint.viewport_width, fingerprint.viewport_height)),
                 sealed_socks: chromium_composer,
+                user_data_dir: sticky_profile_dir,
+                stealth: true,
+                chrome_full_version: Some(fingerprint.chrome_full_version.clone()),
+                chrome_major: Some(fingerprint.chrome_major),
                 ..basecrawl_render::RenderConfig::default()
             },
             deadline,

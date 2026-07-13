@@ -65,6 +65,16 @@ pub enum Error {
     #[error("required proxy class '{required}' unavailable: {detail}")]
     ProxyClassUnavailable { required: String, detail: String },
 
+    /// Hard / residential identity path refused a dual-stack or soft-only fallback
+    /// (VAL-STEALTH-001/017). Configuration or `--no-js` conflicted with the required class.
+    #[error("hard path policy error: {0}")]
+    HardPath(String),
+
+    /// Hard path observed a bot-challenge / block interstitial and refused silent success
+    /// (VAL-STEALTH-016).
+    #[error("blocked by bot challenge (HTTP {status_code}): {detail}")]
+    ChallengeBlocked { status_code: u16, detail: String },
+
     #[error("robots policy denied the requested path")]
     RobotsDenied(Value),
 
@@ -137,6 +147,8 @@ impl Error {
             Error::InvalidActions(_) => "invalid_actions",
             Error::InvalidProxy(_) => "invalid_proxy",
             Error::ProxyClassUnavailable { .. } => "proxy_class_unavailable",
+            Error::HardPath(_) => "hard_path_policy",
+            Error::ChallengeBlocked { .. } => "challenge_blocked",
             Error::RobotsDenied(_) => "robots_denied",
             Error::Timeout(_) => "timeout",
             Error::Transport(_) => "transport_error",
@@ -229,6 +241,13 @@ impl Error {
                 obj.insert(
                     "required_proxy_class".into(),
                     Value::String(required.clone()),
+                );
+            }
+            Error::ChallengeBlocked { status_code, .. } => {
+                obj.insert("status_code".into(), Value::Number((*status_code).into()));
+                obj.insert(
+                    "failure_class".into(),
+                    Value::String("challenge_block".into()),
                 );
             }
             _ => {}

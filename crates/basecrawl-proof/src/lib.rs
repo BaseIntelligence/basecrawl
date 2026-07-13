@@ -230,6 +230,42 @@ impl std::fmt::Display for ProxyClass {
     }
 }
 
+/// Which public client identity path produced the scrape (VAL-STEALTH-001/002/010).
+///
+/// Hard / residential classes must emit [`FetchPath::Chromium`]. Soft targets may keep
+/// [`FetchPath::Direct`] (rustls). Never invent a path that was not actually used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FetchPath {
+    /// Soft rustls / direct HTTP(S) client without headless Chromium.
+    Direct,
+    /// Hard / residential / JS path that drives real headless Chromium.
+    Chromium,
+}
+
+impl FetchPath {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FetchPath::Direct => "direct",
+            FetchPath::Chromium => "chromium",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "direct" | "soft" | "rustls" => Some(FetchPath::Direct),
+            "chromium" | "browser" | "hard" | "chrome" => Some(FetchPath::Chromium),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for FetchPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Network egress metadata (egress IP, geo landmark RTTs, timestamp, fingerprint seed).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Egress {
@@ -242,6 +278,10 @@ pub struct Egress {
     /// to a higher commercial class than what was dialed (VAL-PROXY-026..028).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_class: Option<ProxyClass>,
+    /// Truthful client path used for the scrape. Hard/residential requests must report
+    /// `chromium` rather than a soft-only identity (VAL-STEALTH-001/010).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_path: Option<FetchPath>,
 }
 
 /// Signed measurement registers carried by an Intel TDX TD10 report.

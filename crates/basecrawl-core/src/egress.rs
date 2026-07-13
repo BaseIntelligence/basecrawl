@@ -9,7 +9,7 @@
 
 use crate::error::Error;
 use crate::rtt_echo::LandmarkMeasurement;
-use basecrawl_proof::{Egress, ProxyClass};
+use basecrawl_proof::{Egress, FetchPath, ProxyClass};
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use time::format_description::well_known::Rfc3339;
@@ -36,6 +36,7 @@ pub fn build(
         fingerprint_seed,
         BTreeMap::new(),
         ProxyClass::Direct,
+        FetchPath::Direct,
     )
 }
 
@@ -46,6 +47,7 @@ pub fn build_with_landmark_rtts(
     fingerprint_seed: &str,
     landmark_rtts: BTreeMap<String, f64>,
     proxy_class: ProxyClass,
+    fetch_path: FetchPath,
 ) -> Result<Egress, Error> {
     let timestamp = fetched_at
         .format(&Rfc3339)
@@ -57,6 +59,7 @@ pub fn build_with_landmark_rtts(
         timestamp: Some(timestamp),
         fingerprint_seed: Some(fingerprint_seed.to_string()),
         proxy_class: Some(proxy_class),
+        fetch_path: Some(fetch_path),
     })
 }
 
@@ -102,6 +105,7 @@ mod tests {
         assert!(egress.landmark_rtts.is_empty());
         assert_eq!(egress.fingerprint_seed.as_deref(), Some(seed.as_str()));
         assert_eq!(egress.proxy_class, Some(ProxyClass::Direct));
+        assert_eq!(egress.fetch_path, Some(FetchPath::Direct));
     }
 
     #[test]
