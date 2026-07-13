@@ -186,20 +186,34 @@ fn books_open_web_smoke_is_strict_and_bounded() {
 
 #[test]
 fn httpbin_open_web_smoke_is_strict_and_bounded() {
+    // Named TLS authenticity smoke remains on the public TLS 1.3 mirror. Hermetic CI HTTP-semantics
+    // coverage uses BASECRAWL_HTTPBIN_BASE (plain loopback) and must not assert TLS 1.3 here.
     let url = format!("{}/get", common::HTTPBIN_TLS13_MIRROR);
     smoke_public_url("httpbin TLS 1.3 mirror", &url, "nghttp2.org");
 }
 
 #[test]
-fn httpbin_helper_requires_a_tls13_capable_mirror() {
-    assert_eq!(
-        common::httpbin_base(),
-        common::HTTPBIN_TLS13_MIRROR,
-        "HTTP-semantics tests must not fall back to a TLS 1.2-only origin"
-    );
+fn httpbin_helper_prefers_env_override_and_lists_public_candidates() {
     assert_eq!(
         common::HTTPBIN_CANDIDATES,
-        &[common::HTTPBIN_TLS13_MIRROR],
-        "the named httpbin smoke has one capability-verified TLS 1.3 target"
+        &[
+            common::HTTPBIN_TLS13_MIRROR,
+            "https://httpbin.org",
+            "https://httpbingo.org",
+        ],
+        "public HTTP-semantics fallbacks remain capability-ordered"
+    );
+    if let Some(configured) = common::httpbin_env_override() {
+        assert_eq!(
+            common::httpbin_base(),
+            configured.as_str(),
+            "BASECRAWL_HTTPBIN_BASE / HTTPBIN_BASE must select the hermetic origin without probing public mirrors"
+        );
+        return;
+    }
+    let selected = common::httpbin_base();
+    assert!(
+        common::HTTPBIN_CANDIDATES.contains(&selected),
+        "without an env override the helper must pick a public candidate, got {selected}"
     );
 }

@@ -1,10 +1,9 @@
 //! Shared test support for the `basecrawl-core` integration tests.
 //!
-//! The validation contract names `httpbin.org` as the HTTP-semantics target, but that host is
-//! TLS 1.2-only in this validation environment and cannot produce normal authenticity evidence.
-//! [`httpbin_base`] therefore uses the capability-verified TLS 1.3 reference-httpbin deployment
-//! at `nghttp2.org/httpbin`, which runs the same endpoints (redirects, gzip/deflate/brotli,
-//! headers, ...) as `httpbin.org`.
+//! HTTP-semantics integration tests target an httpbin-compatible origin. Prefer a hermetic
+//! local container via `BASECRAWL_HTTPBIN_BASE` / `HTTPBIN_BASE` (CI sets this). When unset,
+//! [`httpbin_base`] probes public mirrors, keeping the TLS 1.3-capable `nghttp2.org/httpbin`
+//! deployment first because normal HTTPS scrapes require TLS 1.3 authenticity evidence.
 #![allow(dead_code)]
 
 use base64::Engine;
@@ -20,32 +19,74 @@ use x509_parser::prelude::parse_x509_certificate;
 
 /// Capability-verified TLS 1.3 reference-httpbin mirror (no trailing slash).
 ///
-/// `httpbin.org` is TLS 1.2-only in this validation environment, so it cannot produce the
-/// CertificateVerify transcript evidence a normal ScrapeProof requires. `nghttp2.org/httpbin`
-/// runs the reference Python httpbin API and is independently known to negotiate TLS 1.3.
+/// Remote HTTPS candidates used when no hermetic env override is set. Plain HTTP loopback
+/// (CI/local `BASECRAWL_HTTPBIN_BASE`) is preferred for hermetic HTTP-semantics tests; public
+/// mirrors remain as a developer convenience.
 pub const HTTPBIN_TLS13_MIRROR: &str = "https://nghttp2.org/httpbin";
-pub const HTTPBIN_CANDIDATES: &[&str] = &[HTTPBIN_TLS13_MIRROR];
 
-/// Return the capability-verified TLS 1.3 httpbin-compatible base URL, memoized for the lifetime
-/// of the test binary.
+/// Public httpbin-compatible bases in preference order (no trailing slash).
 ///
-/// Panics only if none of the candidates are reachable, which indicates a genuine loss of network
-/// egress rather than a single-host outage.
+/// `nghttp2.org/httpbin` is TLS 1.3-capable and preferred for unattended public runs.
+/// `httpbin.org` / `httpbingo.org` are also probed; HTTPS selection still requires `/get`
+/// reachability plus TLS 1.3 for the host so TLS-gating scrapes do not fail later.
+pub const HTTPBIN_CANDIDATES: &[&str] = &[
+    HTTPBIN_TLS13_MIRROR,
+    "https://httpbin.org",
+    "https://httpbingo.org",
+];
+
+/// Environment variables consulted by [`httpbin_base`] (first non-empty wins).
+const HTTPBIN_ENV_KEYS: &[&str] = &["BASECRAWL_HTTPBIN_BASE", "HTTPBIN_BASE"];
+
+/// Return a configured or reachable httpbin-compatible base URL, memoized for the lifetime of
+/// the test binary.
+///
+/// Order:
+/// 1. `BASECRAWL_HTTPBIN_BASE` / `HTTPBIN_BASE` (trimmed, no trailing slash). Intended for a
+///    hermetic local container on loopback plain HTTP; accepted without a TLS probe.
+/// 2. Public candidates in [`HTTPBIN_CANDIDATES`], capability-probed.
+///
+/// Panics only when no env override is set and no candidate mirror is reachable.
 pub fn httpbin_base() -> &'static str {
     static BASE: OnceLock<&'static str> = OnceLock::new();
     BASE.get_or_init(|| {
+        if let Some(configured) = httpbin_env_override() {
+            // Hermetic CI and local overrides must not depend on public egress or TLS 1.3.
+            return leak_string(configured);
+        }
+        let mut tried = Vec::new();
         for base in HTTPBIN_CANDIDATES {
+            tried.push(*base);
             if probe_ok(base) {
                 return *base;
             }
         }
-        panic!("no TLS 1.3 httpbin-compatible host reachable (tried {HTTPBIN_CANDIDATES:?})");
+        panic!("no httpbin-compatible host reachable (tried {tried:?}; set BASECRAWL_HTTPBIN_BASE for a hermetic local instance)");
     })
 }
 
-/// Probe `{base}/get` with curl, requiring HTTP 200 plus an independent TLS 1.3 OpenSSL
-/// handshake. Curl builds on validation runners do not consistently expose `%{ssl_version}`, so
-/// OpenSSL is the portable capability check.
+/// Non-empty value of the first configured httpbin base env var, stripped of a trailing slash.
+pub fn httpbin_env_override() -> Option<String> {
+    for key in HTTPBIN_ENV_KEYS {
+        if let Ok(value) = std::env::var(key) {
+            let trimmed = value.trim().trim_end_matches('/').to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+    }
+    None
+}
+
+fn leak_string(value: String) -> &'static str {
+    Box::leak(value.into_boxed_str())
+}
+
+/// Probe `{base}/get` with curl.
+///
+/// Plain HTTP (including hermetic loopback containers) only requires HTTP 200.
+/// HTTPS also requires an independent TLS 1.3 OpenSSL handshake so public selection does not
+/// hand HTTP-semantics tests a TLS 1.2-only host that later fails authenticity capture.
 fn probe_ok(base: &str) -> bool {
     let http_ok = Command::new("curl")
         .args([
@@ -70,14 +111,23 @@ fn probe_ok(base: &str) -> bool {
     let Ok(url) = url::Url::parse(base) else {
         return false;
     };
+    // Loopback or explicit plain HTTP needs no TLS. CI's hermetic container uses `http://127.0.0.1`.
+    if url.scheme() == "http" {
+        return true;
+    }
+    if url.scheme() != "https" {
+        return false;
+    }
+
     let Some(host) = url.host_str() else {
         return false;
     };
+    let port = url.port_or_known_default().unwrap_or(443);
     Command::new("openssl")
         .args([
             "s_client",
             "-connect",
-            &format!("{host}:443"),
+            &format!("{host}:{port}"),
             "-servername",
             host,
             "-tls1_3",

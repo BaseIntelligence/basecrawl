@@ -38,11 +38,32 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    # Hermetic httpbin for HTTP-semantics integration tests. Plain HTTP loopback avoids
+    # public-egress flakiness that previously broke http_fetch / redirects / non_html suites.
+    services:
+      httpbin:
+        # Classic Python httpbin: full endpoint set including /brotli and authenticated{true}
+        # shape used by HTTP-semantics tests. Plain HTTP loopback keeps the suite hermetic.
+        image: kennethreitz/httpbin:latest
+        ports:
+          - 8080:80
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Wait for hermetic httpbin
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS -o /dev/null -w "%{http_code}" "http://127.0.0.1:8080/get" | grep -q '^200$'; then
+              echo "httpbin ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "hermetic httpbin did not become ready" >&2
+          exit 1
       - name: Cargo test
         run: cargo test --workspace --all-features
         env:
           RUST_TEST_THREADS: "1"
+          BASECRAWL_HTTPBIN_BASE: http://127.0.0.1:8080
