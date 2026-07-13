@@ -58,3 +58,12 @@ documented residual backstop until the CVE is patched and the image measurement 
 
 The residual is never hidden: authenticity is cryptographically-anchored trust-but-audit, not
 an absolute TEE claim.
+
+## TEE.fail residual (self-hosted) + managed-cloud mitigation
+
+Separately from Chromium/OS 0-days, **TEE.fail** residual remains on **self-hosted**
+hardware: a **DDR5 bus interposer can forge quotes and read enclave memory**, and
+there is **no vendor fix**. That residual degrades both quote authenticity and
+content-confidentiality for self-hosted deployments. The operational mitigation is
+**managed-cloud** placement (e.g. Phala TDX) where the miner has no bus access;
+relay further weights and audits accordingly. Full wording lives in `docs/SECURITY.md`.

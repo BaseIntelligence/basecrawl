@@ -561,7 +561,7 @@ pub(crate) fn resolve_address_with(
 /// Build a rustls configuration with Mozilla roots. TLS 1.2 remains enabled only so the default
 /// verifier can reject an invalid legacy peer as `certificate_validation` before its negotiated
 /// version is rejected as unsuitable for authenticity evidence. Resumption is disabled to
-/// guarantee each scrape has a complete certificate-bearing handshake.
+/// ensure each scrape has a complete certificate-bearing handshake.
 ///
 /// Non-security fingerprint dimensions (TLS 1.3 cipher offer order and supported-group order) are
 /// parameterized by the seed-derived lists so honest miners emit diverse JA3/JA4 values while
