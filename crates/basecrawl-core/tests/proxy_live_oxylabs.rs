@@ -492,14 +492,18 @@ fn val_proxy_031_live_residential_smoke_returns_200_and_non_local_exit() {
     let sess = unique_sessid("live31-");
     let host_ip = host_direct_public_ip();
 
+    // Residential class forces hard-path Chromium policy (VAL-STEALTH-001/017). Never pass
+    // `--no-js` here — dual-stack soft fallback is refused. Non-HTML geo JSON still dials the
+    // residential upstream via the hard-path planner without claiming soft identity success under --no-js.
     let out = run_live(
         &[
             LIVE_GEO_URL,
-            "--no-js",
             "--formats",
             "rawHtml",
             "--timeout",
             "45",
+            "--render-timeout",
+            "30",
         ],
         &proxy,
         Some(&sess),
@@ -577,14 +581,16 @@ fn val_proxy_032_live_sticky_session_same_exit_ip() {
     let proxy = creds.proxy_url();
     let sess = unique_sessid("live32-");
 
+    // Same hard-path rule as 031: residential refuses --no-js.
     let out1 = run_live(
         &[
             LIVE_GEO_URL,
-            "--no-js",
             "--formats",
             "rawHtml",
             "--timeout",
             "45",
+            "--render-timeout",
+            "30",
         ],
         &proxy,
         Some(&sess),
@@ -594,11 +600,12 @@ fn val_proxy_032_live_sticky_session_same_exit_ip() {
     let out2 = run_live(
         &[
             LIVE_GEO_URL,
-            "--no-js",
             "--formats",
             "rawHtml",
             "--timeout",
             "45",
+            "--render-timeout",
+            "30",
         ],
         &proxy,
         Some(&sess),
@@ -764,15 +771,16 @@ fn val_proxy_034_live_credentials_never_printed() {
     let proxy = creds.proxy_url();
     let sess = unique_sessid("live34-");
 
-    // Success path.
+    // Success path (residential hard-path: no --no-js).
     let ok = run_live(
         &[
             LIVE_GEO_URL,
-            "--no-js",
             "--formats",
             "rawHtml",
             "--timeout",
             "45",
+            "--render-timeout",
+            "30",
             "--verbose",
         ],
         &proxy,
@@ -792,11 +800,12 @@ fn val_proxy_034_live_credentials_never_printed() {
     let bad = run_live(
         &[
             "https://this-host-does-not-exist-basecrawl-live-proxy-034.test/",
-            "--no-js",
             "--formats",
             "rawHtml",
             "--timeout",
             "12",
+            "--render-timeout",
+            "10",
             "--verbose",
         ],
         &proxy,
@@ -818,10 +827,11 @@ fn val_proxy_034_live_credentials_never_printed() {
     let timed = run_live(
         &[
             LIVE_GEO_URL,
-            "--no-js",
             "--formats",
             "rawHtml",
             "--timeout",
+            "1",
+            "--render-timeout",
             "1",
             "--verbose",
         ],
