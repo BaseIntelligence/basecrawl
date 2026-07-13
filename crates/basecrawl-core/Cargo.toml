@@ -41,6 +41,7 @@ time.workspace = true
 quick-xml.workspace = true
 pdf-extract.workspace = true
 zip.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 png.workspace = true

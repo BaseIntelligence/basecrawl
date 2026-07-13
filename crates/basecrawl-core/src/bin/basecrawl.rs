@@ -165,6 +165,13 @@ struct Cli {
     /// normalized seed always appears in egress.fingerprint_seed and report_data.
     #[arg(long = "fingerprint-seed", value_name = "SEED")]
     fingerprint_seed: Option<String>,
+
+    /// Universal egress proxy URL for the soft (rustls) path:
+    /// `http(s)://[user:pass@]host:port` (HTTP CONNECT) or `socks5://[user:pass@]host:port`.
+    /// Overrides ambient `BASECRAWL_HTTP_PROXY` / `BASECRAWL_HTTPS_PROXY` / `HTTPS_PROXY` /
+    /// `ALL_PROXY` when set. Credentials stay out of ScrapeProof and host-visible logs.
+    #[arg(long = "proxy", value_name = "URL")]
+    proxy: Option<String>,
 }
 
 fn run(cli: Cli) -> Result<String, Error> {
@@ -260,6 +267,7 @@ fn run(cli: Cli) -> Result<String, Error> {
         sign_proof: cli.sign_proof,
         fingerprint_seed: cli.fingerprint_seed,
         landmark_rtts: None,
+        proxy: cli.proxy,
     };
 
     let proof = scrape(&raw_url, &options)?;

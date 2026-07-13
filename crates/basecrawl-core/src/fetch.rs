@@ -7,6 +7,7 @@
 //! HTTPS is terminated directly by rustls so the generated ScrapeProof binds the server's TLS
 //! handshake metadata from the same connection that carried the response.
 use crate::error::Error;
+use crate::proxy::ProxyConfig;
 use base64::Engine;
 use basecrawl_proof::{CertificateValidation, RedirectHop, Tls};
 use basecrawl_render::{OriginPacer, PacingDeadlineExceeded};
@@ -86,6 +87,9 @@ pub struct FetchConfig {
     pub tls13_cipher_names: Vec<String>,
     /// Seeded TLS supported-group names in ClientHello preference order. Empty means provider default.
     pub tls_group_order: Vec<String>,
+    /// Optional universal egress proxy (HTTP CONNECT / HTTPS-scheme / SOCKS5). When set, every
+    /// origin dial is negotiated through the upstream; there is **no** silent direct fallback.
+    pub proxy: Option<ProxyConfig>,
 }
 
 impl Default for FetchConfig {
@@ -101,6 +105,7 @@ impl Default for FetchConfig {
             origin_pacer: OriginPacer::default(),
             tls13_cipher_names: Vec::new(),
             tls_group_order: Vec::new(),
+            proxy: None,
         }
     }
 }
@@ -418,8 +423,7 @@ fn fetch_http(
         .host_str()
         .ok_or_else(|| Error::InvalidUrl(url.to_string()))?;
     let port = url.port_or_known_default().unwrap_or(80);
-    let address = resolve_address(host, port, deadline)?;
-    let stream = TcpStream::connect_timeout(&address, remaining(deadline)?).map_err(classify_io)?;
+    let stream = open_origin_stream(host, port, config, deadline)?;
     let egress_ip = stream.local_addr().map_err(classify_io)?.ip();
     let mut stream = DeadlineStream::new(stream, deadline);
 
@@ -465,8 +469,7 @@ fn fetch_https(
         // Host-safe: never embed the requested hostname string in an error path that
         // reaches host-visible stderr (VAL-CONF-018 / 031). Surface a generic invalid-URL.
         .map_err(|_| Error::InvalidUrl(url.to_string()))?;
-    let address = resolve_address(host, port, deadline)?;
-    let tcp = TcpStream::connect_timeout(&address, remaining(deadline)?).map_err(classify_io)?;
+    let tcp = open_origin_stream(host, port, config, deadline)?;
     let egress_ip = tcp.local_addr().map_err(classify_io)?.ip();
 
     let capture = Arc::new(TlsCaptureState::default());
@@ -525,6 +528,24 @@ fn fetch_https(
         tls: Some(tls),
         egress_ip: Some(egress_ip),
     })
+}
+
+/// Open a TCP stream to the origin, optionally via a configured universal proxy.
+///
+/// Direct path: resolve with sealed DoH/DoT (VAL-CONF-013) then connect.
+/// Proxied path: dial the upstream (HTTP CONNECT / SOCKS5) and tunnel to `host:port`.
+/// There is never a silent fallback from proxy failure to a direct dial (VAL-PROXY-020).
+fn open_origin_stream(
+    host: &str,
+    port: u16,
+    config: &FetchConfig,
+    deadline: Instant,
+) -> Result<TcpStream, Error> {
+    if let Some(proxy) = &config.proxy {
+        return proxy.connect_to_target(host, port, deadline);
+    }
+    let address = resolve_address(host, port, deadline)?;
+    TcpStream::connect_timeout(&address, remaining(deadline)?).map_err(classify_io)
 }
 
 /// Resolve `host:port` for origin connect using the in-enclave DoH/DoT pin.

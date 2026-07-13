@@ -57,6 +57,9 @@ pub enum Error {
     #[error("invalid actions specification: {0}")]
     InvalidActions(String),
 
+    #[error("invalid proxy configuration: {0}")]
+    InvalidProxy(String),
+
     #[error("robots policy denied the requested path")]
     RobotsDenied(Value),
 
@@ -127,6 +130,7 @@ impl Error {
             Error::InvalidHeader(_) => "invalid_header",
             Error::InvalidViewport(_) => "invalid_viewport",
             Error::InvalidActions(_) => "invalid_actions",
+            Error::InvalidProxy(_) => "invalid_proxy",
             Error::RobotsDenied(_) => "robots_denied",
             Error::Timeout(_) => "timeout",
             Error::Transport(_) => "transport_error",

@@ -20,6 +20,7 @@ pub mod links;
 pub mod markdown;
 pub mod metadata;
 pub mod pagination;
+pub mod proxy;
 pub mod robots;
 pub mod rtt_echo;
 pub mod screenshot;
@@ -116,6 +117,11 @@ pub struct ScrapeOptions {
     /// measured landmarks (via [`rtt_echo::probe_landmarks`]) pass the resulting map so the
     /// validator can cross-check against independently measured floors.
     pub landmark_rtts: Option<std::collections::BTreeMap<String, f64>>,
+    /// Explicit egress proxy URL (`http(s)://` CONNECT or `socks5://`, optional user:pass).
+    /// When set, this overrides ambient `BASECRAWL_*` / `HTTPS_PROXY` / `ALL_PROXY` env vars.
+    /// When unset, [`proxy::resolve_proxy`] consults that env stack. Credentials never appear in
+    /// ScrapeProof or host-visible logs (VAL-PROXY-023/024).
+    pub proxy: Option<String>,
 }
 
 impl Default for ScrapeOptions {
@@ -147,6 +153,7 @@ impl Default for ScrapeOptions {
             sign_proof: false,
             fingerprint_seed: None,
             landmark_rtts: None,
+            proxy: None,
         }
     }
 }
@@ -220,6 +227,10 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
     for (name, value) in &effective_headers {
         fetch::validate_header_pair(name, value)?;
     }
+    // Resolve the soft-path egress proxy before any origin dial. Explicit CLI/config wins over
+    // ambient BASECRAWL_HTTP(S)_PROXY / HTTPS_PROXY / ALL_PROXY (VAL-PROXY-005/006). Failures of
+    // a configured upstream are hard errors (no silent direct fallback; VAL-PROXY-020).
+    let proxy = proxy::resolve_proxy(options.proxy.as_deref(), &url)?;
     let config = FetchConfig {
         timeout: Duration::from_secs(options.timeout_secs),
         headers: effective_headers,
@@ -230,6 +241,7 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
         crawl_delay: Duration::from_millis(options.crawl_delay_ms),
         tls13_cipher_names: fingerprint.tls13_cipher_names.clone(),
         tls_group_order: fingerprint.tls_group_order.clone(),
+        proxy,
         ..FetchConfig::default()
     };
     let document_policy =
