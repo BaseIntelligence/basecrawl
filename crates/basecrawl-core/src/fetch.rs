@@ -90,6 +90,12 @@ pub struct FetchConfig {
     /// Optional universal egress proxy (HTTP CONNECT / HTTPS-scheme / SOCKS5). When set, every
     /// origin dial is negotiated through the upstream; there is **no** silent direct fallback.
     pub proxy: Option<ProxyConfig>,
+    /// HTTP method for the *initial* request (GET default). Redirect hops may force-switch to GET
+    /// without a body when the redirect status is 301/302/303 (RFC 9110 client practice).
+    pub method: String,
+    /// Request body bytes sent on the initial request only (POST). Empty by default. Body integrity
+    /// is hashed into ScrapeProof `request.body_hash` by the scrapper, never written to host logs.
+    pub body: Vec<u8>,
 }
 
 impl Default for FetchConfig {
@@ -106,6 +112,8 @@ impl Default for FetchConfig {
             tls13_cipher_names: Vec::new(),
             tls_group_order: Vec::new(),
             proxy: None,
+            method: "GET".to_string(),
+            body: Vec::new(),
         }
     }
 }
@@ -330,6 +338,9 @@ where
     let mut redirects: Vec<RedirectHop> = Vec::new();
     let mut tls = Tls::default();
     let mut egress_ip = None;
+    // Method/body apply to the initial hop only. After a 301/302/303 a conservative client switches
+    // to GET without replaying the body (VAL-CRAWLPROD-001 still records the original method).
+    let mut hop_config = config.clone();
 
     loop {
         // This must precede every transport operation. In particular, a redirect target cannot
@@ -339,11 +350,11 @@ where
         // continuation. It is deliberately in this redirect loop, so every physical same-origin
         // request, including robots, sitemaps, pagination, and redirects, consumes one floor.
         let response = match current.scheme() {
-            "http" => config.transmit_with_pacing(&current, deadline, || {
-                fetch_http(&current, config, credential_origin, deadline)
+            "http" => hop_config.transmit_with_pacing(&current, deadline, || {
+                fetch_http(&current, &hop_config, credential_origin, deadline)
             })??,
-            "https" => config.transmit_with_pacing(&current, deadline, || {
-                fetch_https(&current, config, credential_origin, deadline)
+            "https" => hop_config.transmit_with_pacing(&current, deadline, || {
+                fetch_https(&current, &hop_config, credential_origin, deadline)
             })??,
             scheme => return Err(Error::UnsupportedScheme(scheme.to_string())),
         };
@@ -374,6 +385,15 @@ where
                     url: current.to_string(),
                     location: target.to_string(),
                 });
+                // RFC 9110 client practice: 301/302/303 → GET without replaying the body for the
+                // next hop. 307/308 preserve method; body is still only on the first hop in MVP.
+                if matches!(response.status_code, 301..=303) {
+                    hop_config.method = "GET".to_string();
+                    hop_config.body.clear();
+                } else {
+                    // Subsequent hops never re-POST:
+                    hop_config.body.clear();
+                }
                 current = target;
                 continue;
             }
@@ -727,6 +747,16 @@ fn build_http_request(
     config: &FetchConfig,
     credential_origin: &Url,
 ) -> Result<Vec<u8>, Error> {
+    let method = if config.method.trim().is_empty() {
+        "GET"
+    } else {
+        config.method.trim()
+    };
+    // Method token: token letters only (RFC 9110). Reject FOO-like garbage early so scrape surfaces
+    // a structured error rather than sending invalid request-lines.
+    if !is_valid_http_method(method) {
+        return Err(Error::UnsupportedMethod(method.to_string()));
+    }
     let path = if url.path().is_empty() {
         "/"
     } else {
@@ -742,13 +772,17 @@ fn build_http_request(
         format!("{host}:{port}")
     };
     let mut request = format!(
-        "GET {target} HTTP/1.1\r\nHost: {host_header}\r\nAccept-Encoding: gzip, deflate, br\r\nConnection: close\r\n",
+        "{method} {target} HTTP/1.1\r\nHost: {host_header}\r\nAccept-Encoding: gzip, deflate, br\r\nConnection: close\r\n",
     );
     let mut emitted_user_agent = false;
+    let mut emitted_content_type = false;
     for (name, value) in config.caller_headers_for(url, credential_origin) {
         validate_header_pair(name, value)?;
         if name.eq_ignore_ascii_case("user-agent") {
             emitted_user_agent = true;
+        }
+        if name.eq_ignore_ascii_case("content-type") {
+            emitted_content_type = true;
         }
         request.push_str(name);
         request.push_str(": ");
@@ -761,8 +795,48 @@ fn build_http_request(
         request.push_str(&config.user_agent);
         request.push_str("\r\n");
     }
+    // Content-Length is transport-managed: emit for a non-empty body (or explicit POST even when
+    // empty) so echo servers see a well-formed body framing.
+    let send_body = !config.body.is_empty() || method.eq_ignore_ascii_case("POST");
+    if send_body {
+        if !emitted_content_type && !config.body.is_empty() {
+            // Callers should include Content-Type; default application/octet-stream is honest.
+            request.push_str("content-type: application/octet-stream\r\n");
+        }
+        request.push_str(&format!("content-length: {}\r\n", config.body.len()));
+    }
     request.push_str("\r\n");
-    Ok(request.into_bytes())
+    let mut bytes = request.into_bytes();
+    if send_body {
+        bytes.extend_from_slice(&config.body);
+    }
+    Ok(bytes)
+}
+
+/// RFC 9110 method token: one-or-more `tchar` characters that are uppercase letters or common
+/// extension tokens. We accept the standard methods plus reject free-form invalid tokens.
+fn is_valid_http_method(method: &str) -> bool {
+    !method.is_empty()
+        && method.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
 }
 
 fn parse_http_response(raw: &[u8]) -> Result<(u16, Headers, Vec<u8>), Error> {

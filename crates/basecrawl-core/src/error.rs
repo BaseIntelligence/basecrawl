@@ -51,6 +51,19 @@ pub enum Error {
     #[error("invalid request header '{0}' (expected 'Name: Value')")]
     InvalidHeader(String),
 
+    /// HTTP method is not supported or not a valid RFC 9110 token (VAL-CRAWLPROD-006).
+    #[error("unsupported HTTP method '{0}'")]
+    UnsupportedMethod(String),
+
+    /// Hard / residential browser path does not accept POST body submission in this build.
+    /// Soft path still transmits POST; silent empty-body success is forbidden (VAL-CRAWLPROD-007).
+    #[error("POST is not supported on the hard Chromium path in this build")]
+    PostNotSupportedOnHardPath,
+
+    /// Crawl / map / batch bounds argument failure (fail-closed).
+    #[error("invalid crawl/map/batch option: {0}")]
+    InvalidProductOption(String),
+
     #[error("invalid viewport '{0}' (expected WIDTHxHEIGHT, e.g. 1280x800)")]
     InvalidViewport(String),
 
@@ -143,6 +156,9 @@ impl Error {
             Error::UnsupportedOutput(_) => "unsupported_output",
             Error::StructuredExtractionUnsupported => "structured_extraction_unsupported",
             Error::InvalidHeader(_) => "invalid_header",
+            Error::UnsupportedMethod(_) => "unsupported_method",
+            Error::PostNotSupportedOnHardPath => "post_not_supported_on_hard_path",
+            Error::InvalidProductOption(_) => "invalid_product_option",
             Error::InvalidViewport(_) => "invalid_viewport",
             Error::InvalidActions(_) => "invalid_actions",
             Error::InvalidProxy(_) => "invalid_proxy",
@@ -222,6 +238,16 @@ impl Error {
                     Value::String("structured_extraction".into()),
                 );
                 obj.insert("reason".into(), Value::String("not_built".into()));
+            }
+            Error::UnsupportedMethod(method) => {
+                obj.insert("method".into(), Value::String(method.clone()));
+            }
+            Error::PostNotSupportedOnHardPath => {
+                obj.insert(
+                    "capability".into(),
+                    Value::String("post_on_hard_path".into()),
+                );
+                obj.insert("reason".into(), Value::String("not_supported".into()));
             }
             Error::TooManyRedirects { max, url } => {
                 obj.insert("max_redirects".into(), Value::Number((*max).into()));

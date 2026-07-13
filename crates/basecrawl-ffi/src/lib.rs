@@ -63,6 +63,10 @@ struct BindingOptions {
     sign_proof: Option<bool>,
     #[serde(alias = "fingerprint_seed")]
     fingerprint_seed: Option<String>,
+    /// HTTP method (`GET` default, `POST` supported on soft path).
+    method: Option<String>,
+    /// Request body for POST as a UTF-8 string (binary bodies use the CLI `@file` path).
+    body: Option<String>,
 }
 
 /// Error returned to bindings as the same structured JSON shape as core errors.
@@ -191,6 +195,12 @@ fn parse_options(options_json: Option<&str>) -> Result<ScrapeOptions, BindingErr
     }
     if let Some(fingerprint_seed) = binding_options.fingerprint_seed {
         options.fingerprint_seed = Some(fingerprint_seed);
+    }
+    if let Some(method) = binding_options.method {
+        options.method = method;
+    }
+    if let Some(body) = binding_options.body {
+        options.body = body.into_bytes();
     }
 
     Ok(options)

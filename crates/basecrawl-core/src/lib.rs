@@ -7,9 +7,11 @@
 //! on by subsequent features.
 
 pub mod attestation;
+pub mod batch;
 pub mod canonical;
 pub mod charset;
 pub mod content;
+pub mod crawl;
 pub mod document;
 pub mod egress;
 pub mod error;
@@ -17,9 +19,11 @@ pub mod fetch;
 pub mod format;
 pub mod html;
 pub mod links;
+pub mod map_lite;
 pub mod markdown;
 pub mod metadata;
 pub mod pagination;
+pub mod product_request;
 pub mod proxy;
 pub mod robots;
 pub mod rtt_echo;
@@ -49,7 +53,7 @@ pub use format::Format;
 pub use robots::RobotsPolicy;
 
 /// The default HTTP method for a scrape.
-pub const DEFAULT_METHOD: &str = "GET";
+pub const DEFAULT_METHOD: &str = product_request::DEFAULT_METHOD;
 
 /// Default cap on the number of pages crawled when pagination following is enabled.
 pub const DEFAULT_MAX_PAGES: usize = 5;
@@ -67,6 +71,11 @@ pub struct ScrapeOptions {
     pub timeout_secs: u64,
     /// Extra request headers to send, as parsed `(name, value)` pairs.
     pub headers: Vec<(String, String)>,
+    /// HTTP method for the origin request (`GET` default, `POST` supported on soft path).
+    /// Recorded honestly into ScrapeProof `request.method` (VAL-CRAWLPROD-001/005).
+    pub method: String,
+    /// Request body bytes for POST. Empty for GET. Hashed into `request.body_hash`.
+    pub body: Vec<u8>,
     /// Bypass TLS certificate verification. Disabled by default and intended only for an explicit
     /// diagnostic fetch of an invalid-certificate origin.
     pub insecure: bool,
@@ -153,6 +162,8 @@ impl Default for ScrapeOptions {
             nonce: None,
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             headers: Vec::new(),
+            method: DEFAULT_METHOD.to_string(),
+            body: Vec::new(),
             insecure: false,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             crawl_delay_ms: 0,
@@ -199,6 +210,10 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
     } else {
         format::normalize(options.formats.clone())
     };
+
+    // Method + body validation before network work (VAL-CRAWLPROD-001..006).
+    let method = product_request::normalize_method(Some(options.method.as_str()))?;
+    product_request::validate_method_body(&method, &options.body)?;
 
     // JSON structured extraction depends on an optional LLM-backed capability that is not part of
     // this deterministic M1 image. Refuse it before robots/fetch/render work so callers never
@@ -285,12 +300,23 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
         needs_browser_formats,
     };
     let hard_required = stealth::requires_chromium_hard_path(hard_decision);
-    let will_use_browser = stealth::will_launch_chromium(hard_decision, hard_required).map_err(
-        |error| match error {
-            stealth::StealthPolicyError::HardPathDisabled { reason } => Error::HardPath(reason),
-            stealth::StealthPolicyError::Profile(detail) => Error::HardPath(detail),
-        },
-    )?;
+    // Hard Chromium path does not submit POST bodies in this build. Refuse before browser policy /
+    // launch work so callers never see a silent empty-body success (VAL-CRAWLPROD-007). Soft POST
+    // continues on rustls without browser identity so body transmission stays honest.
+    if method.eq_ignore_ascii_case("POST") && hard_required {
+        return Err(Error::PostNotSupportedOnHardPath);
+    }
+    let will_use_browser = if method.eq_ignore_ascii_case("POST") {
+        // Soft POST body framing is only implemented on the rustls path.
+        false
+    } else {
+        stealth::will_launch_chromium(hard_decision, hard_required).map_err(
+            |error| match error {
+                stealth::StealthPolicyError::HardPathDisabled { reason } => Error::HardPath(reason),
+                stealth::StealthPolicyError::Profile(detail) => Error::HardPath(detail),
+            },
+        )?
+    };
     // Sticky profile for multipage cookie continuity on one task; wiped across task_ids
     // (VAL-STEALTH-011..014). Soft-only scrapes skip an empty profile.
     let sticky_profile_dir = if will_use_browser {
@@ -330,6 +356,8 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
         tls13_cipher_names: fingerprint.tls13_cipher_names.clone(),
         tls_group_order: fingerprint.tls_group_order.clone(),
         proxy,
+        method: method.clone(),
+        body: options.body.clone(),
         ..FetchConfig::default()
     };
     let document_policy =
@@ -339,12 +367,11 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
     })?;
     let robots_decision = document_policy.initial_decision();
 
-    // The request-side hashes cover the one validated ordered effective header list. The empty GET
-    // body remains explicitly hashed.
+    // The request-side hashes cover the one validated ordered effective header list plus the actual
+    // request body bytes (empty for GET, transmitted body for POST) — VAL-CRAWLPROD-004.
     let headers_hash = canonical::headers_hash(&config.headers);
-    let body_hash = canonical::body_hash(&[]);
-    let request_hash =
-        canonical::request_hash(DEFAULT_METHOD, url.as_str(), &headers_hash, &body_hash);
+    let body_hash = canonical::body_hash(&options.body);
+    let request_hash = canonical::request_hash(&method, url.as_str(), &headers_hash, &body_hash);
     let format_names: Vec<String> = formats
         .iter()
         .map(|format| format.as_str().to_string())
@@ -691,7 +718,7 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
         task_id: options.task_id.clone(),
         nonce: options.nonce.clone(),
         request: Request {
-            method: DEFAULT_METHOD.to_string(),
+            method: method.clone(),
             url: url.as_str().to_string(),
             headers_hash: Some(headers_hash),
             body_hash: Some(body_hash),
