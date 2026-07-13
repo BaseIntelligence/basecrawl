@@ -2,6 +2,7 @@
   "name": "@basecrawl/sdk",
   "version": "0.1.0",
   "description": "Node.js SDK for the basecrawl ScrapeProof crawler",
+  "license": "Apache-2.0",
   "main": "index.js",
   "types": "index.d.ts",
   "files": [
