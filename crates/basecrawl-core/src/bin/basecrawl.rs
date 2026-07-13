@@ -27,7 +27,7 @@ use std::path::PathBuf;
     name = "basecrawl",
     version,
     about = "Verifiable web crawler (single scrape, POST/body, crawl MVP, map-lite, batch). \
-Cryptographically-anchored trust-but-audit — not trustless, not anonymity.",
+Cryptographically-anchored trust-but-audit model (not anonymity).",
     long_about = None
 )]
 struct Cli {
