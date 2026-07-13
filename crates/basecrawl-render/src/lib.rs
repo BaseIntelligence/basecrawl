@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -51,9 +51,12 @@ pub const DEFAULT_MAX_RENDER_SUBRESOURCES: usize = 128;
 
 /// Default cap on cumulative accepted browser-response bytes during one scrape.
 ///
-/// CDP response bodies are streamed through the interceptor and charged by actual observed bytes.
+/// CDP response bodies are charged by actual observed bytes. A response-stage `Fetch.getResponseBody`
+/// materializes the full body (including chunked transfers without `Content-Length`) before the
+/// page is allowed to consume it, so settle cannot capture a partial proof under a race.
 /// `Content-Length` can reject an obviously too-large response early, but never contributes to the
-/// accounting total by itself.
+/// accounting total by itself. Progressive `Network.dataReceived` events still charge streamed
+/// bytes so a remaining budget can trip before a pathological body finishes downloading.
 pub const DEFAULT_MAX_RENDER_BYTES: u64 = 20 * 1024 * 1024;
 
 /// A caller-supplied check run before Chromium transmits a top-level document request.
@@ -291,6 +294,10 @@ pub struct RenderResourceBudget {
     max_requests: u64,
     max_bytes: u64,
     state: Arc<Mutex<RenderResourceState>>,
+    /// Count of response-stage body materializations still in flight for this budget.
+    /// Settle must not succeed while this is non-zero, or a slow chunked transfer can race past the
+    /// byte charge and emit a partial proof under the cap.
+    pending_body_accounts: Arc<AtomicUsize>,
 }
 
 impl RenderResourceBudget {
@@ -300,6 +307,7 @@ impl RenderResourceBudget {
             max_requests: max_requests as u64,
             max_bytes,
             state: Arc::new(Mutex::new(RenderResourceState::default())),
+            pending_body_accounts: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -352,6 +360,28 @@ impl RenderResourceBudget {
         }
         state.usage.resource_bytes = total;
         Ok(())
+    }
+
+    /// Charge only the still-unaccounted delta for a completed body, so progressive
+    /// `Network.dataReceived` events and the response-stage full-body charge cannot double-count.
+    fn charge_remaining_bytes(&self, total_observed: u64, already_charged: u64) -> Result<(), RenderError> {
+        let additional = total_observed.saturating_sub(already_charged);
+        if additional == 0 {
+            return Ok(());
+        }
+        self.charge_bytes(additional)
+    }
+
+    fn begin_body_account(&self) {
+        self.pending_body_accounts.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn finish_body_account(&self) {
+        self.pending_body_accounts.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn has_pending_body_accounts(&self) -> bool {
+        self.pending_body_accounts.load(Ordering::SeqCst) > 0
     }
 
     fn exhaust(&self) {
@@ -521,9 +551,12 @@ struct ResourceGuard {
 /// Configure per-origin pacing and one scrape-owned browser resource budget.
 ///
 /// Request interception prevents requests above the count cap before transmission and rejects an
-/// obviously excessive declared length as an early hint. `Network.dataReceived` then charges every
-/// actually received byte, including chunked and invalid-length responses. An exhausted budget
-/// closes the tab promptly, and the render path turns that into a structured failure.
+/// obviously excessive declared length as an early hint. Response-stage interception materializes
+/// the full body via `Fetch.getResponseBody` (obligatory for chunked / no-`Content-Length`
+/// responses) and charges observed bytes before the page is allowed to consume it. Progressive
+/// `Network.dataReceived` events still charge while download is in flight so budgets fail closed
+/// promptly. An exhausted budget closes the tab, and the render path turns that into a structured
+/// failure without a partial proof.
 fn configure_resource_guard(
     tab: &Arc<Tab>,
     config: &RenderConfig,
@@ -595,7 +628,7 @@ fn configure_resource_guard(
                         error_reason: ErrorReason::BlockedByClient,
                     });
                 }
-                if let Some(network_id) = paused.params.network_id {
+                if let Some(network_id) = paused.params.network_id.clone() {
                     response_meters_for_requests
                         .lock()
                         .expect("browser response meter mutex must not be poisoned")
@@ -608,7 +641,117 @@ fn configure_resource_guard(
                             },
                         );
                 }
-                return RequestPausedDecision::Continue(None);
+
+                // Materialize the full body at the response boundary. For chunked transfers without
+                // Content-Length, Chromium only finalizes this once every chunk has been read, so the
+                // shared scrape budget charges the true observed length before settlement races past.
+                let fetch_request_id = paused.params.request_id.clone();
+                let network_id = paused.params.network_id.clone();
+                let response_status = paused.params.response_status_code.unwrap_or(200);
+                let response_headers = paused.params.response_headers.clone();
+                let response_phrase = paused.params.response_status_text.clone();
+                let budget = budget_for_requests.clone();
+                let meters = Arc::clone(&response_meters_for_requests);
+                budget.begin_body_account();
+                return RequestPausedDecision::Deferred(Arc::new(move |transport, session_id, _event| {
+                    let body_result = transport.call_method_on_target(
+                        session_id.clone(),
+                        Fetch::GetResponseBody {
+                            request_id: fetch_request_id.clone(),
+                        },
+                    );
+                    let fail_response = || {
+                        let _ = transport.call_method_on_target(
+                            session_id.clone(),
+                            Fetch::FailRequest {
+                                request_id: fetch_request_id.clone(),
+                                error_reason: ErrorReason::BlockedByClient,
+                            },
+                        );
+                    };
+                    let Ok(body) = body_result else {
+                        budget.exhaust();
+                        fail_response();
+                        budget.finish_body_account();
+                        return;
+                    };
+                    let observed = match observed_body_len(&body.body, body.base_64_encoded) {
+                        Some(len) => len,
+                        None => {
+                            budget.exhaust();
+                            fail_response();
+                            budget.finish_body_account();
+                            return;
+                        }
+                    };
+                    let already_charged = network_id
+                        .as_ref()
+                        .and_then(|id| {
+                            meters
+                                .lock()
+                                .expect("browser response meter mutex must not be poisoned")
+                                .get(&id.to_string())
+                                .map(|meter| meter.observed_bytes)
+                        })
+                        .unwrap_or(0);
+                    let document_exceeded =
+                        is_document && observed > max_document_bytes;
+                    let budget_exceeded = if document_exceeded {
+                        true
+                    } else {
+                        budget
+                            .charge_remaining_bytes(observed, already_charged)
+                            .is_err()
+                    };
+                    if document_exceeded || budget_exceeded {
+                        budget.exhaust();
+                        fail_response();
+                        budget.finish_body_account();
+                        return;
+                    }
+                    if let Some(network_id) = network_id.as_ref() {
+                        if let Some(meter) = meters
+                            .lock()
+                            .expect("browser response meter mutex must not be poisoned")
+                            .get_mut(&network_id.to_string())
+                        {
+                            meter.observed_bytes = observed.max(meter.observed_bytes);
+                        }
+                    }
+                    // Re-present the already-downloaded body so consumer-side download accounting is
+                    // consistent even when progressive dataReceived under-reported.
+                    let body_for_fulfill = if body.base_64_encoded {
+                        Some(body.body)
+                    } else {
+                        Some(base64::prelude::BASE64_STANDARD.encode(body.body.as_bytes()))
+                    };
+                    let fulfill = Fetch::FulfillRequest {
+                        request_id: fetch_request_id.clone(),
+                        response_code: response_status,
+                        response_headers: response_headers.clone(),
+                        binary_response_headers: None,
+                        body: body_for_fulfill,
+                        response_phrase: response_phrase.clone(),
+                    };
+                    if transport
+                        .call_method_on_target(session_id.clone(), fulfill)
+                        .is_err()
+                    {
+                        // Fall back to continue so the target is not left paused forever if fulfill
+                        // is unavailable for this resource type; bytes were already charged.
+                        let _ = transport.call_method_on_target(
+                            session_id,
+                            Fetch::ContinueResponse {
+                                request_id: fetch_request_id.clone(),
+                                response_code: None,
+                                response_phrase: None,
+                                response_headers: None,
+                                binary_response_headers: None,
+                            },
+                        );
+                    }
+                    budget.finish_body_account();
+                }));
             }
 
             let is_top_document = is_document && paused.params.frame_id == top_frame_id;
@@ -701,7 +844,7 @@ fn configure_resource_guard(
         };
         // CDP's encoded length is the received transfer size. Some Chromium response paths report
         // it as zero on an individual chunk, so fall back to the observed payload length rather
-        // than letting a chunked or malformed-length response escape accounting.
+        // than letting a chunked or malformed-length response escape progressive accounting.
         let encoded_bytes = u64::from(event.params.encoded_data_length);
         let bytes = if encoded_bytes == 0 {
             u64::from(event.params.data_length)
@@ -738,6 +881,19 @@ fn configure_resource_guard(
     }))
     .map_err(|error| RenderError::Render(error.to_string()))?;
     Ok(())
+}
+
+/// Decode the CDP-reported response body length, interpreting base64 when Chromium flagged it so
+/// byte accounting tracks actual payload size rather than the encoded transport size.
+fn observed_body_len(body: &str, base64_encoded: bool) -> Option<u64> {
+    if base64_encoded {
+        base64::prelude::BASE64_STANDARD
+            .decode(body.as_bytes())
+            .ok()
+            .map(|bytes| bytes.len() as u64)
+    } else {
+        Some(body.len() as u64)
+    }
 }
 
 /// Resume a paused request with caller headers restricted to their initiating origin.
@@ -1329,6 +1485,8 @@ fn set_tab_deadline(tab: &Tab, deadline: Instant, timeout: Duration) -> Result<(
 /// Wait until a top-frame document request has committed and the page's network has been idle for
 /// `quiet_period`. Client redirects are counted by the top-frame `Fetch.requestPaused` boundary,
 /// not by polling a URL, so same-URL reloads count while fragment-only SPA transitions do not.
+/// Body accounting that is still materializing a chunked response also blocks settle so a partial
+/// proof cannot race past the scrape-owned byte budget.
 fn settle_and_follow_redirects(
     tab: &Tab,
     config: &RenderConfig,
@@ -1347,6 +1505,11 @@ fn settle_and_follow_redirects(
         navigation_tracker.ensure_within_limit()?;
         resource_budget.ensure_available()?;
         set_tab_deadline(tab, deadline, config.timeout)?;
+
+        if resource_budget.has_pending_body_accounts() {
+            thread::sleep(poll.min(remaining(deadline, config.timeout)?));
+            continue;
+        }
 
         if !config.network_idle {
             return Ok(());
@@ -1386,6 +1549,11 @@ fn wait_for_selector_and_follow_redirects(
         resource_budget.ensure_available()?;
         set_tab_deadline(tab, deadline, config.timeout)?;
 
+        if resource_budget.has_pending_body_accounts() {
+            thread::sleep(poll.min(remaining(deadline, config.timeout)?));
+            continue;
+        }
+
         set_tab_deadline(tab, deadline, config.timeout)?;
         let present = tab
             .evaluate(&selector_probe, false)
@@ -1421,6 +1589,10 @@ fn settle_quiet(
         }
         if Instant::now() >= step_deadline {
             return;
+        }
+        if resource_budget.has_pending_body_accounts() {
+            thread::sleep(poll.min(step_deadline.saturating_duration_since(Instant::now())));
+            continue;
         }
         if let Some(snap) = probe_idle(tab) {
             if snap.ready == "complete" && snap.inflight <= 0 && snap.quiet_ms >= quiet_ms {
