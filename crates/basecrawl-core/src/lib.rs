@@ -259,6 +259,24 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
     };
     let proxy = proxy::resolve_proxy_plan(&proxy_plan, &url)?;
     let dialed_proxy_class = proxy::truthful_proxy_class(proxy.as_ref(), options.proxy_class)?;
+    // Chromium hard path shares the soft-path dialer via a DoH-preserving composer
+    // (VAL-PROXY-012/015..019). Only start when the scrape will launch headless Chromium so soft
+    // --no-js paths stay cheap. Bind/start failures under a required commercial class fail closed
+    // before any Chromium target is created (VAL-PROXY-022).
+    let will_use_browser = formats.iter().any(|f| matches!(f, Format::Screenshot))
+        || (options.render_enabled
+            && (formats
+                .iter()
+                .any(|f| matches!(f, Format::Markdown | Format::Html))
+                || options.follow_pagination));
+    let chromium_composer = if will_use_browser {
+        match proxy.as_ref() {
+            Some(cfg) => Some(proxy::start_chromium_composer(cfg)?),
+            None => None,
+        }
+    } else {
+        None
+    };
     let config = FetchConfig {
         timeout: Duration::from_secs(options.timeout_secs),
         headers: effective_headers,
@@ -364,6 +382,7 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
                 locale: Some(fingerprint.locale.clone()),
                 fingerprint_script: Some(basecrawl_fp::browser_injection_script(&fingerprint)),
                 window_size: Some((fingerprint.viewport_width, fingerprint.viewport_height)),
+                sealed_socks: chromium_composer.clone(),
                 ..basecrawl_render::RenderConfig::default()
             },
             deadline,
@@ -443,6 +462,7 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
                         fingerprint_script: Some(basecrawl_fp::browser_injection_script(
                             &fingerprint,
                         )),
+                        sealed_socks: chromium_composer.clone(),
                     },
                     deadline,
                 )?;
@@ -489,6 +509,7 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
                 &document_policy,
                 render_resource_budget.clone(),
                 &fingerprint,
+                chromium_composer.clone(),
                 deadline,
             )?;
             if let Some(agg) = aggregated_markdown.as_mut() {
@@ -659,8 +680,12 @@ fn materialize_robots_policy_hops(
 }
 
 /// Fetch and extract a single pagination page: returns its markdown, the HTML used to locate the
-/// next link (rendered DOM when rendering applies, else the served source), and the resolution base.
+/// next link (rendered DOM when rendering applies, else the scraped source), and the resolution base.
 /// Subsequent pages are not subject to the page-1 scripted actions.
+///
+/// When the scrape has a commercial/mock upstream, `chromium_composer` is the same sticky dialer
+/// handle used by the first-page/browser actions so multipage stays on one exit hop (VAL-PROXY-012).
+#[allow(clippy::too_many_arguments)] // scrape-owned composer must share sticky dial with page-1
 fn crawl_page(
     url: &Url,
     options: &ScrapeOptions,
@@ -668,6 +693,7 @@ fn crawl_page(
     document_policy: &robots::DocumentPolicy,
     render_resource_budget: basecrawl_render::RenderResourceBudget,
     fingerprint: &basecrawl_fp::FingerprintProfile,
+    chromium_composer: Option<std::sync::Arc<basecrawl_seal::SealedSocksProxy>>,
     deadline: Instant,
 ) -> Result<(String, String, Url), Error> {
     let fetched = fetch::fetch_document_until(url, config, deadline, |target| {
@@ -701,6 +727,7 @@ fn crawl_page(
                 locale: Some(fingerprint.locale.clone()),
                 fingerprint_script: Some(basecrawl_fp::browser_injection_script(fingerprint)),
                 window_size: Some((fingerprint.viewport_width, fingerprint.viewport_height)),
+                sealed_socks: chromium_composer,
                 ..basecrawl_render::RenderConfig::default()
             },
             deadline,

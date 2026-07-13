@@ -9,9 +9,11 @@
 use crate::error::Error;
 use base64::Engine;
 use basecrawl_proof::ProxyClass;
+use basecrawl_seal::{OriginDialer, SealError, SealedSocksProxy};
 use std::fmt;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use url::Url;
 use zeroize::Zeroizing;
@@ -763,6 +765,85 @@ fn classify_proxy_io(error: std::io::Error) -> Error {
     } else {
         Error::Transport(format!("proxy transport error: {error}"))
     }
+}
+
+/// Soft-path [`ProxyConfig`] adapted as a sealed-SOCKS [`OriginDialer`].
+///
+/// Used by the Chromium DoH-preserving composer so sticky session / country username templates
+/// and HTTP CONNECT / SOCKS5 dials are the **same dialer family** as rustls (VAL-PROXY-018/019).
+#[derive(Clone)]
+pub struct ComposerOriginDialer {
+    proxy: ProxyConfig,
+}
+
+impl ComposerOriginDialer {
+    pub fn new(proxy: ProxyConfig) -> Self {
+        Self { proxy }
+    }
+
+    pub fn proxy(&self) -> &ProxyConfig {
+        &self.proxy
+    }
+}
+
+impl OriginDialer for ComposerOriginDialer {
+    fn dial_origin(&self, addr: SocketAddr, deadline: Instant) -> Result<TcpStream, SealError> {
+        // Prefer IP-literal authority so the commercial dial never reintroduces host DNS for the
+        // origin (DoH already pinned the name). Username templates / credentials still apply.
+        let host = addr.ip().to_string();
+        let port = addr.port();
+        self.proxy
+            .connect_to_target(&host, port, deadline)
+            .map_err(|err| SealError::Dns {
+                detail: format!("composer upstream dial failed: {err}"),
+            })
+    }
+}
+
+/// Start a DoH-preserving Chromium composer for a configured commercial/mock upstream.
+///
+/// Chromium continues to use loopback SOCKS only (`socks5://127.0.0.1:…`); after sealed DoH
+/// resolve the composer dials the same universal proxy the soft path uses. Failures of
+/// bind/start surface as [`Error::DnsIsolation`] so required proxy scrapes fail closed
+/// (VAL-PROXY-015..019, VAL-PROXY-022).
+pub fn start_chromium_composer(proxy: &ProxyConfig) -> Result<Arc<SealedSocksProxy>, Error> {
+    // Hermetic VAL-PROXY-022 inject: force composer start failure under required Chromium proxy
+    // without relying on non-deterministic ephemeral bind races. Unset in production.
+    if std::env::var_os("BASECRAWL_COMPOSER_FAIL_START").is_some() {
+        return Err(Error::DnsIsolation(
+            "could not start DoH-preserving proxy composer for Chromium (sealed SOCKS bind failed: Address already in use)"
+                .to_string(),
+        ));
+    }
+    let dialer: Arc<dyn OriginDialer> = Arc::new(ComposerOriginDialer::new(proxy.clone()));
+    SealedSocksProxy::start_composed_doh(dialer)
+        .map(Arc::new)
+        .map_err(|err| {
+            Error::DnsIsolation(format!(
+                "could not start DoH-preserving proxy composer for Chromium ({err})"
+            ))
+        })
+}
+
+/// Attempt to start a composer bound to a specific loopback address (test/debug surface for
+/// VAL-PROXY-022 bind conflicts). Production scrapes use ephemeral ports via
+/// [`start_chromium_composer`].
+pub fn start_chromium_composer_on(
+    bind_addr: SocketAddr,
+    proxy: &ProxyConfig,
+) -> Result<Arc<SealedSocksProxy>, Error> {
+    let dialer: Arc<dyn OriginDialer> = Arc::new(ComposerOriginDialer::new(proxy.clone()));
+    SealedSocksProxy::start_composed_on(
+        bind_addr,
+        Arc::new(basecrawl_seal::PinnedResolver::doh()),
+        dialer,
+    )
+    .map(Arc::new)
+    .map_err(|err| {
+        Error::DnsIsolation(format!(
+            "could not start DoH-preserving proxy composer for Chromium ({err})"
+        ))
+    })
 }
 
 #[cfg(test)]

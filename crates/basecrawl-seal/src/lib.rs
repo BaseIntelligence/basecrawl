@@ -68,7 +68,8 @@ pub use antibot_feedback::{
 };
 pub use browser_dns::{
     chrome_dns_isolation_proxy_arg, document_host_needs_sealed_resolve, global_sealed_socks_proxy,
-    preflight_document_dns, SealedSocksProxy, SEALED_BROWSER_DNS_MARKER,
+    preflight_document_dns, DirectOriginDialer, OriginDialer, SealedSocksProxy, COMPOSER_MARKER,
+    SEALED_BROWSER_DNS_MARKER,
 };
 pub use dns::{
     build_query, is_loopback_name, parse_answers, resolve_for_connect, NameResolver,

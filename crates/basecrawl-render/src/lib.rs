@@ -218,6 +218,14 @@ pub struct RenderConfig {
     pub fingerprint_script: Option<String>,
     /// Optional Chromium window size override; defaults to (1280, 800) when unset.
     pub window_size: Option<(u32, u32)>,
+    /// Optional sealed SOCKS / DoH-preserving composer for this browser launch.
+    ///
+    /// When set (M12 commercial/mock upstream), Chromium still receives
+    /// `--proxy-server=socks5://127.0.0.1:…` pointing at this accept port after sealed DoH resolve
+    /// and sole-path commercial dial. When unset, the process-global sealed direct SOCKS/DoH
+    /// proxy is used (VAL-CONF-013 default). The Arc keeps the accept loop alive for the whole
+    /// render/screenshot lifetime (VAL-PROXY-015..019/022).
+    pub sealed_socks: Option<Arc<basecrawl_seal::SealedSocksProxy>>,
 }
 
 impl Default for RenderConfig {
@@ -249,6 +257,7 @@ impl Default for RenderConfig {
             locale: None,
             fingerprint_script: None,
             window_size: None,
+            sealed_socks: None,
         }
     }
 }
@@ -1013,39 +1022,52 @@ fn declared_content_length(headers: &[Fetch::HeaderEntry]) -> Option<u64> {
 /// `--disable-dev-shm-usage`/`--disable-gpu` keep Chromium stable in a container. Sandbox is
 /// disabled because the crawler runs as root. The returned browser is killed when dropped.
 ///
-/// # DNS isolation (VAL-CONF-013)
+/// # DNS isolation (VAL-CONF-013 / VAL-PROXY-015..017)
 ///
 /// Every Chromium launch is forced through an in-process sealed SOCKS5 proxy that resolves
-/// domain names exclusively via pin-by-IP DoH (`basecrawl_seal::PinnedResolver`) and dials
-/// targets by IP. Chromium hands hostnames to the SOCKS proxy (ATYP=domain) rather than the
-/// host stub for navigated origins. If the sealed SOCKS path cannot be established, launch
-/// fails closed with [`RenderError::DnsIsolation`] and no Chromium target is created.
+/// domain names exclusively via pin-by-IP DoH (`basecrawl_seal::PinnedResolver`) and then dials
+/// either directly by IP or via the commercial/mock [`OriginDialer`] installed on a scrape-owned
+/// composer instance. Chromium hands hostnames to the SOCKS proxy (ATYP=domain) rather than the
+/// host stub for navigated origins. If the sealed/composer SOCKS path cannot be established,
+/// launch fails closed with [`RenderError::DnsIsolation`] and no Chromium target is created.
 fn launch_browser(
     deadline: Instant,
     timeout: Duration,
     window_size: (u32, u32),
+    sealed_socks: Option<&Arc<basecrawl_seal::SealedSocksProxy>>,
 ) -> Result<Browser, RenderError> {
     let chrome = resolve_chrome().ok_or(RenderError::ChromeNotFound)?;
-    let proxy = basecrawl_seal::global_sealed_socks_proxy().map_err(|error| {
-        RenderError::DnsIsolation(format!(
-            "could not establish sealed DoH SOCKS path before Chromium launch ({error})"
-        ))
-    })?;
     // Owned String: LaunchOptions takes `&str` for proxy_server but we must keep storage alive
-    // for the duration of `Browser::new_with_deadline`.
-    let proxy_server = proxy.proxy_server_arg();
-    // Bypass SOCKS for loopback only so local fixtures / CDP keep working without a sealed
-    // resolve. Every non-loopback hostname still reaches the sealed SOCKS path, which resolves
-    // via pin-by-IP DoH and dials by IP (VAL-CONF-013 for render/screenshot).
-    let proxy_bypass = "--proxy-bypass-list=127.0.0.1;localhost;::1";
-    let args: Vec<&OsStr> = vec![
+    // for the duration of `Browser::new_with_deadline`. Prefer scrape-owned composer, else global.
+    let proxy_server = match sealed_socks {
+        Some(proxy) => proxy.proxy_server_arg(),
+        None => {
+            let proxy = basecrawl_seal::global_sealed_socks_proxy().map_err(|error| {
+                RenderError::DnsIsolation(format!(
+                    "could not establish sealed DoH SOCKS path before Chromium launch ({error})"
+                ))
+            })?;
+            proxy.proxy_server_arg()
+        }
+    };
+    // Bypass SOCKS for loopback only on the *direct* sealed path so local fixtures / CDP keep
+    // working without DoH. When a commercial/mock composer is required, **do not** bypass
+    // loopback — Chromium multipage fixtures must still tunnel through the composer so sticky
+    // sessions and mock hop IDs are observed (VAL-PROXY-012/015). CDP uses the Chrome pipe path
+    // and does not depend on proxy-bypass.
+    let composed = sealed_socks
+        .map(|proxy| proxy.is_composed())
+        .unwrap_or(false);
+    let mut args: Vec<&OsStr> = vec![
         OsStr::new("--disable-dev-shm-usage"),
         OsStr::new("--disable-gpu"),
         OsStr::new("--hide-scrollbars"),
         OsStr::new("--force-color-profile=srgb"),
         OsStr::new("--font-render-hinting=none"),
-        OsStr::new(proxy_bypass),
     ];
+    if !composed {
+        args.push(OsStr::new("--proxy-bypass-list=127.0.0.1;localhost;::1"));
+    }
     let options = LaunchOptions::default_builder()
         .path(Some(chrome))
         .headless(true)
@@ -1061,13 +1083,29 @@ fn launch_browser(
         .map_err(|error| RenderError::Launch(error.to_string()))
 }
 
-/// Fail-closed preflight: resolve the document hostname through sealed DoH **before** any
-/// Chromium target/navigation is created. IP literals and loopback names short-circuit.
-fn preflight_sealed_document_dns(url: &Url, deadline: Instant) -> Result<(), RenderError> {
+/// Fail-closed preflight: resume sealed DoH **before** any Chromium target is created.
+///
+/// When a scrape-owned composer is provided it is used as the readiness gate (VAL-PROXY-022);
+/// otherwise the process-global direct sealed SOCKS path is used.
+fn preflight_sealed_document_dns(
+    url: &Url,
+    deadline: Instant,
+    sealed_socks: Option<&Arc<basecrawl_seal::SealedSocksProxy>>,
+) -> Result<(), RenderError> {
     let host = url
         .host_str()
         .ok_or_else(|| RenderError::DnsIsolation("document URL has no host".into()))?;
     if !basecrawl_seal::document_host_needs_sealed_resolve(host) {
+        // Still require the SOCKS/composer path to be available if proxy is required by caller.
+        if let Some(proxy) = sealed_socks {
+            let _ = proxy.addr();
+        } else {
+            let _ = basecrawl_seal::global_sealed_socks_proxy().map_err(|error| {
+                RenderError::DnsIsolation(format!(
+                    "sealed browser SOCKS unavailable before target creation ({error})"
+                ))
+            })?;
+        }
         return Ok(());
     }
     let port = url
@@ -1085,12 +1123,14 @@ fn preflight_sealed_document_dns(url: &Url, deadline: Instant) -> Result<(), Ren
             "sealed DoH preflight for browser document failed ({error})"
         ))
     })?;
-    // Also ensure the SOCKS path is up before Browser::new so launch cannot race a Fail-open DNS.
-    let _ = basecrawl_seal::global_sealed_socks_proxy().map_err(|error| {
-        RenderError::DnsIsolation(format!(
-            "sealed browser SOCKS unavailable before target creation ({error})"
-        ))
-    })?;
+    // Also ensure the SOCKS/composer path is up before Browser::new so launch cannot race fail-open DNS.
+    if sealed_socks.is_none() {
+        let _ = basecrawl_seal::global_sealed_socks_proxy().map_err(|error| {
+            RenderError::DnsIsolation(format!(
+                "sealed browser SOCKS unavailable before target creation ({error})"
+            ))
+        })?;
+    }
     Ok(())
 }
 
@@ -1313,10 +1353,15 @@ pub fn render_until(
         RenderResourceBudget::new(config.max_subresources, config.max_resource_bytes)
     });
     resource_budget.ensure_available()?;
-    // VAL-CONF-013: sealed DoH preflight + SOCKS readiness before any Chromium target exists.
-    preflight_sealed_document_dns(url, deadline)?;
+    // VAL-CONF-013 / VAL-PROXY-015..022: sealed DoH preflight + SOCKS/composer readiness.
+    preflight_sealed_document_dns(url, deadline, config.sealed_socks.as_ref())?;
     let window_size = config.window_size.unwrap_or((1280, 800));
-    let browser = launch_browser(deadline, config.timeout, window_size)?;
+    let browser = launch_browser(
+        deadline,
+        config.timeout,
+        window_size,
+        config.sealed_socks.as_ref(),
+    )?;
     let tab = browser
         .new_tab()
         .map_err(|e| RenderError::Launch(e.to_string()))?;
@@ -1756,6 +1801,9 @@ pub struct ScreenshotConfig {
     pub locale: Option<String>,
     /// Script injected via `Page.addScriptToEvaluateOnNewDocument` for canvas/WebGL diversity.
     pub fingerprint_script: Option<String>,
+    /// Optional sealed SOCKS / DoH-preserving composer for this capture (same semantics as
+    /// [`RenderConfig::sealed_socks`]).
+    pub sealed_socks: Option<Arc<basecrawl_seal::SealedSocksProxy>>,
 }
 
 impl Default for ScreenshotConfig {
@@ -1780,6 +1828,7 @@ impl Default for ScreenshotConfig {
             timezone: None,
             locale: None,
             fingerprint_script: None,
+            sealed_socks: None,
         }
     }
 }
@@ -1836,9 +1885,14 @@ pub fn screenshot_until(
         RenderResourceBudget::new(config.max_subresources, config.max_resource_bytes)
     });
     resource_budget.ensure_available()?;
-    // VAL-CONF-013: sealed DoH preflight + SOCKS readiness before any Chromium target exists.
-    preflight_sealed_document_dns(url, deadline)?;
-    let browser = launch_browser(deadline, config.timeout, (config.width, config.height))?;
+    // VAL-CONF-013 / VAL-PROXY-015..022: sealed DoH preflight + SOCKS/composer readiness.
+    preflight_sealed_document_dns(url, deadline, config.sealed_socks.as_ref())?;
+    let browser = launch_browser(
+        deadline,
+        config.timeout,
+        (config.width, config.height),
+        config.sealed_socks.as_ref(),
+    )?;
     let tab = browser
         .new_tab()
         .map_err(|e| RenderError::Launch(e.to_string()))?;

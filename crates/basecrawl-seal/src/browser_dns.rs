@@ -13,9 +13,16 @@
 //!    performs remote DNS through the proxy rather than system port 53 for
 //!    navigated origins.
 //!
+//! When a commercial/mock upstream proxy is configured (M12 composer), the same
+//! SOCKS accept + DoH pin path is retained, but the post-resolve dial uses an
+//! [`OriginDialer`] that speaks HTTP CONNECT / SOCKS5 to the universal upstream
+//! (shared dialer family with the soft rustls path). Chromium still only sees
+//! loopback SOCKS; host system DNS never receives target QNAMEs
+//! (VAL-PROXY-015..017).
+//!
 //! Fail-closed: if the sealed proxy cannot be established, callers receive
 //! [`SealError::Dns`] and render must abort before any Chromium target is
-//! created.
+//! created (VAL-PROXY-022 under required Chromium proxy).
 //!
 //! Note: we intentionally do **not** pass a blanket
 //! `--host-resolver-rules=MAP * ~NOTFOUND` rule. That pattern is site-local and
@@ -25,6 +32,7 @@
 
 use crate::dns::{is_loopback_name, resolve_for_connect, NameResolver, PinnedResolver};
 use crate::error::SealError;
+use std::fmt;
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,15 +43,62 @@ use std::time::{Duration, Instant};
 /// Privacy path marker for telemetry / log greps (never embeds QNAMEs).
 pub const SEALED_BROWSER_DNS_MARKER: &str = "basecrawl-seal/browser-socks-doh-v1";
 
-/// Handle to a running sealed SOCKS5 proxy.
+/// Marker for the DoH-preserving commercial/mock composer path (Chromium → loopback
+/// SOCKS → sealed resolve → universal upstream dialer).
+pub const COMPOSER_MARKER: &str = "basecrawl-seal/browser-composer-doh-proxy-v1";
+
+/// Post-resolve origin dial used by the sealed SOCKS composer.
 ///
-/// Dropping the handle signals the acceptor to stop. Existing tunnels finish
-/// independently. A process-global proxy is also available via
-/// [`global_sealed_socks_proxy`].
-#[derive(Debug)]
+/// Default production dial is a direct TCP connect to the already-resolved
+/// address. When a universal commercial/mock proxy is configured, core injects a
+/// dialer that reuses the soft-path HTTP CONNECT / SOCKS5 client so sticky
+/// session and country username templates are shared (VAL-PROXY-018/019).
+pub trait OriginDialer: Send + Sync {
+    /// Dial `addr` (already resolved; IP-only preferred) before the absolute deadline.
+    ///
+    /// Failures must not fall open to an alternate host-DNS path; the sealed SOCKS
+    /// layer surfaces them as SOCKS failures / sealed DNS isolation errors.
+    fn dial_origin(&self, addr: SocketAddr, deadline: Instant) -> Result<TcpStream, SealError>;
+}
+
+/// Direct post-resolve TCP dial (no commercial/mock upstream).
+#[derive(Debug, Default)]
+pub struct DirectOriginDialer;
+
+impl OriginDialer for DirectOriginDialer {
+    fn dial_origin(&self, addr: SocketAddr, deadline: Instant) -> Result<TcpStream, SealError> {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|d| !d.is_zero())
+            .ok_or_else(|| SealError::Dns {
+                detail: "deadline expired before origin dial".to_string(),
+            })?;
+        TcpStream::connect_timeout(&addr, remaining).map_err(|e| SealError::Dns {
+            detail: format!("direct origin dial failed: {e}"),
+        })
+    }
+}
+
+/// Handle to a running sealed SOCKS5 proxy (optionally composed over a commercial dialer).
+///
+/// Dropping the handle signals residual acceptor stop. Existing tunnels finish
+/// independently. A process-global direct Sealed socks proxy is also available via
+/// [`global_sealed_socks_proxy`]. Composer instances for proxied Chromium scrapes
+/// are started per-scrape so they share the same upstream dial identity as rustls.
 pub struct SealedSocksProxy {
     addr: SocketAddr,
     stop: Arc<AtomicBool>,
+    /// True when a non-direct [`OriginDialer`] was installed (commercial/mock upstream).
+    composed: bool,
+}
+
+impl fmt::Debug for SealedSocksProxy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SealedSocksProxy")
+            .field("addr", &self.addr)
+            .field("composed", &self.composed)
+            .finish()
+    }
 }
 
 impl SealedSocksProxy {
@@ -57,12 +112,64 @@ impl SealedSocksProxy {
         format!("socks5://{}", self.addr)
     }
 
-    /// Start a sealed SOCKS5 CONNECT proxy that resolves hostnames with `resolver`.
+    /// Whether this instance dials origins through a commercial/mock upstream dialer.
+    pub fn is_composed(&self) -> bool {
+        self.composed
+    }
+
+    /// Start a sealed SOCKS5 CONNECT proxy that resolves hostnames with `resolver`
+    /// and dials the resolved address with the default direct dialer.
     pub fn start(resolver: Arc<dyn NameResolver>) -> Result<Self, SealError> {
-        let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
-            .map_err(|e| SealError::Dns {
-                detail: format!("sealed SOCKS bind failed: {e}"),
-            })?;
+        Self::start_with_dialer(resolver, Arc::new(DirectOriginDialer), false)
+    }
+
+    /// Start a DoH-preserving composer: sealed resolve, then `origin_dialer` to the
+    /// commercial/mock upstream (VAL-PROXY-015..019).
+    pub fn start_composed(
+        resolver: Arc<dyn NameResolver>,
+        origin_dialer: Arc<dyn OriginDialer>,
+    ) -> Result<Self, SealError> {
+        Self::start_with_dialer(resolver, origin_dialer, true)
+    }
+
+    /// Start pinned to the production DoH resolver with a direct post-resolve dial.
+    pub fn start_doh() -> Result<Self, SealError> {
+        Self::start(Arc::new(PinnedResolver::doh()))
+    }
+
+    /// Start a composer pinned to production DoH with the supplied origin dialer.
+    pub fn start_composed_doh(origin_dialer: Arc<dyn OriginDialer>) -> Result<Self, SealError> {
+        Self::start_composed(Arc::new(PinnedResolver::doh()), origin_dialer)
+    }
+
+    /// Attempt to bind a specific loopback address (used for fail-closed tests of
+    /// port revive conflicts under required Chromium proxy — VAL-PROXY-022).
+    pub fn start_composed_on(
+        bind_addr: SocketAddr,
+        resolver: Arc<dyn NameResolver>,
+        origin_dialer: Arc<dyn OriginDialer>,
+    ) -> Result<Self, SealError> {
+        Self::start_on_with_dialer(bind_addr, resolver, origin_dialer, true)
+    }
+
+    fn start_with_dialer(
+        resolver: Arc<dyn NameResolver>,
+        origin_dialer: Arc<dyn OriginDialer>,
+        composed: bool,
+    ) -> Result<Self, SealError> {
+        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        Self::start_on_with_dialer(bind_addr, resolver, origin_dialer, composed)
+    }
+
+    fn start_on_with_dialer(
+        bind_addr: SocketAddr,
+        resolver: Arc<dyn NameResolver>,
+        origin_dialer: Arc<dyn OriginDialer>,
+        composed: bool,
+    ) -> Result<Self, SealError> {
+        let listener = TcpListener::bind(bind_addr).map_err(|e| SealError::Dns {
+            detail: format!("sealed SOCKS bind failed: {e}"),
+        })?;
         listener.set_nonblocking(true).map_err(|e| SealError::Dns {
             detail: format!("sealed SOCKS set_nonblocking failed: {e}"),
         })?;
@@ -72,18 +179,21 @@ impl SealedSocksProxy {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_t = Arc::clone(&stop);
         thread::Builder::new()
-            .name("basecrawl-sealed-socks".into())
-            .spawn(move || accept_loop(listener, resolver, stop_t))
+            .name(if composed {
+                "basecrawl-composer-socks".into()
+            } else {
+                "basecrawl-sealed-socks".into()
+            })
+            .spawn(move || accept_loop(listener, resolver, origin_dialer, stop_t))
             .map_err(|e| SealError::Dns {
                 detail: format!("sealed SOCKS acceptor spawn failed: {e}"),
             })?;
         // Brief readiness: the acceptor is non-blocking; binding already proves listen.
-        Ok(Self { addr, stop })
-    }
-
-    /// Start pinned to the production DoH resolver.
-    pub fn start_doh() -> Result<Self, SealError> {
-        Self::start(Arc::new(PinnedResolver::doh()))
+        Ok(Self {
+            addr,
+            stop,
+            composed,
+        })
     }
 }
 
@@ -125,15 +235,21 @@ pub fn preflight_document_dns(
     resolve_for_connect(host, port, resolver, deadline)
 }
 
-fn accept_loop(listener: TcpListener, resolver: Arc<dyn NameResolver>, stop: Arc<AtomicBool>) {
+fn accept_loop(
+    listener: TcpListener,
+    resolver: Arc<dyn NameResolver>,
+    origin_dialer: Arc<dyn OriginDialer>,
+    stop: Arc<AtomicBool>,
+) {
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
                 let resolver = Arc::clone(&resolver);
+                let origin_dialer = Arc::clone(&origin_dialer);
                 let _ = thread::Builder::new()
                     .name("basecrawl-sealed-socks-conn".into())
                     .spawn(move || {
-                        let _ = handle_client(stream, resolver.as_ref());
+                        let _ = handle_client(stream, resolver.as_ref(), origin_dialer.as_ref());
                     });
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -149,7 +265,11 @@ fn accept_loop(listener: TcpListener, resolver: Arc<dyn NameResolver>, stop: Arc
     }
 }
 
-fn handle_client(mut client: TcpStream, resolver: &dyn NameResolver) -> Result<(), ()> {
+fn handle_client(
+    mut client: TcpStream,
+    resolver: &dyn NameResolver,
+    origin_dialer: &dyn OriginDialer,
+) -> Result<(), ()> {
     client
         .set_read_timeout(Some(Duration::from_secs(30)))
         .map_err(|_| ())?;
@@ -180,6 +300,7 @@ fn handle_client(mut client: TcpStream, resolver: &dyn NameResolver) -> Result<(
         let _ = write_socks_reply(&mut client, 0x07, SocketAddr::from(([0, 0, 0, 0], 0)));
         return Err(());
     }
+    let deadline = Instant::now() + Duration::from_secs(15);
     let target = match req_hdr[3] {
         0x01 => {
             let mut ip = [0u8; 4];
@@ -197,7 +318,6 @@ fn handle_client(mut client: TcpStream, resolver: &dyn NameResolver) -> Result<(
             client.read_exact(&mut port_b).map_err(|_| ())?;
             let port = u16::from_be_bytes(port_b);
             let host = String::from_utf8(host).map_err(|_| ())?;
-            let deadline = Instant::now() + Duration::from_secs(15);
             match resolve_for_connect(&host, port, resolver, deadline) {
                 Ok(addr) => addr,
                 Err(_) => {
@@ -223,7 +343,8 @@ fn handle_client(mut client: TcpStream, resolver: &dyn NameResolver) -> Result<(
         }
     };
 
-    let upstream = match TcpStream::connect_timeout(&target, Duration::from_secs(15)) {
+    // Post-resolve dial: direct TCP or commercial/mock upstream dialer (composer).
+    let upstream = match origin_dialer.dial_origin(target, deadline) {
         Ok(stream) => stream,
         Err(_) => {
             let _ = write_socks_reply(&mut client, 0x05, SocketAddr::from(([0, 0, 0, 0], 0)));
@@ -389,6 +510,7 @@ mod unit_tests {
             ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
         }))
         .expect("start socks");
+        assert!(!proxy.is_composed());
 
         let mut client = TcpStream::connect(proxy.addr()).unwrap();
         // greeting
@@ -417,5 +539,92 @@ mod unit_tests {
         let n = client.read(&mut echo).unwrap();
         assert_eq!(&echo[..n], b"ping-via-socks");
         up_thread.join().unwrap();
+    }
+
+    /// Composer OriginDialer is invoked with the sealed-resolved IP, never a bare hostname dial.
+    struct CountingDialer {
+        calls: std::sync::Mutex<Vec<SocketAddr>>,
+    }
+
+    impl OriginDialer for CountingDialer {
+        fn dial_origin(&self, addr: SocketAddr, deadline: Instant) -> Result<TcpStream, SealError> {
+            self.calls.lock().unwrap().push(addr);
+            DirectOriginDialer.dial_origin(addr, deadline)
+        }
+    }
+
+    #[test]
+    fn composed_socks_uses_origin_dialer_after_sealed_resolve() {
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let up_addr = upstream.local_addr().unwrap();
+        let up_thread = thread::spawn(move || {
+            let (mut s, _) = upstream.accept().unwrap();
+            let mut buf = [0u8; 64];
+            let n = s.read(&mut buf).unwrap();
+            s.write_all(&buf[..n]).unwrap();
+        });
+
+        let dialer = Arc::new(CountingDialer {
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let proxy = SealedSocksProxy::start_composed(
+            Arc::new(FixedResolver {
+                ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            }),
+            Arc::clone(&dialer) as Arc<dyn OriginDialer>,
+        )
+        .expect("start composed socks");
+        assert!(proxy.is_composed());
+        assert!(chrome_dns_isolation_proxy_arg(&proxy).starts_with("socks5://127.0.0.1:"));
+
+        let mut client = TcpStream::connect(proxy.addr()).unwrap();
+        client.write_all(&[0x05, 0x01, 0x00]).unwrap();
+        let mut resp = [0u8; 2];
+        client.read_exact(&mut resp).unwrap();
+        assert_eq!(resp, [0x05, 0x00]);
+
+        let host = b"confid-composer-target.basecrawl.test";
+        let mut req = Vec::new();
+        req.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, host.len() as u8]);
+        req.extend_from_slice(host);
+        req.extend_from_slice(&up_addr.port().to_be_bytes());
+        client.write_all(&req).unwrap();
+        let mut reply = [0u8; 10];
+        client.read_exact(&mut reply).unwrap();
+        assert_eq!(reply[1], 0x00, "composed SOCKS CONNECT must succeed");
+
+        client.write_all(b"ping-via-composer").unwrap();
+        let mut echo = [0u8; 64];
+        let n = client.read(&mut echo).unwrap();
+        assert_eq!(&echo[..n], b"ping-via-composer");
+        up_thread.join().unwrap();
+
+        let calls = dialer.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_eq!(calls[0].port(), up_addr.port());
+    }
+
+    #[test]
+    fn bind_conflict_fails_closed_without_fallback_proxy() {
+        let holder = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = holder.local_addr().unwrap();
+        let err = SealedSocksProxy::start_composed_on(
+            addr,
+            Arc::new(FixedResolver {
+                ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            }),
+            Arc::new(DirectOriginDialer),
+        )
+        .expect_err("bind conflict must fail closed");
+        match err {
+            SealError::Dns { detail } => {
+                assert!(
+                    detail.contains("sealed SOCKS bind failed"),
+                    "unexpected detail: {detail}"
+                );
+            }
+            other => panic!("expected Dns bind failure, got {other:?}"),
+        }
     }
 }
