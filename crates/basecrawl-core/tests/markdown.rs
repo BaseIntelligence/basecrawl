@@ -137,10 +137,13 @@ fn product_page_image_is_markdown_with_absolute_src() {
 }
 
 // VAL-CRAWL-034
+//
+// Uses the deterministic loopback fixture (not a remote httpbin) so CI does not flake when the
+// TLS 1.3 httpbin mirror is unreachable. The assertion is that a zero-body 204 still produces
+// empty-but-valid markdown without failing the scrape pipeline.
 #[test]
 fn empty_204_page_yields_empty_but_valid_markdown() {
-    let base = common::httpbin_base();
-    let url = format!("{base}/status/204");
+    let url = common::fixture_url("/status/204");
     let v = scrape_json(&[&url, "--formats", "markdown"]);
     assert_eq!(
         v["response"]["status_code"], 204,

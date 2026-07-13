@@ -543,6 +543,8 @@ fn fixture_response(path: &str) -> (&'static str, &'static str, String) {
         "/scroll/" => ("200 OK", "text/html; charset=utf-8", scroll_page()),
         "/js/" => ("200 OK", "text/html; charset=utf-8", js_page()),
         "/tall/" => ("200 OK", "text/html; charset=utf-8", tall_page()),
+        // VAL-CRAWL-034: empty success response with no body (No Content).
+        "/status/204" => ("204 No Content", "text/plain; charset=utf-8", String::new()),
         "/missing" => (
             "404 Not Found",
             "text/plain; charset=utf-8",
