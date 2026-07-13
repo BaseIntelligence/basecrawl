@@ -171,6 +171,11 @@
           "type": "string",
           "enum": ["direct", "datacenter", "residential", "mobile"],
           "description": "Truthful egress class of the actual dial path. Must never claim residential/mobile for a direct dial."
+        },
+        "fetch_path": {
+          "type": "string",
+          "enum": ["direct", "chromium"],
+          "description": "Truthful client path used for the scrape. Hard/residential requests must report chromium rather than a soft-only identity."
         }
       }
     },

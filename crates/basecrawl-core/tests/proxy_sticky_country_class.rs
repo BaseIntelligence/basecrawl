@@ -330,6 +330,7 @@ fn proxy_url_with_creds(base: &str) -> String {
 
 // ---------------------------------------------------------------------------
 // VAL-PROXY-010 — same sticky session → same hop
+// Soft --no-js sticky path uses datacenter; residential forces Chromium (VAL-STEALTH-001/017).
 // ---------------------------------------------------------------------------
 #[test]
 fn val_proxy_010_same_session_reuses_hop() {
@@ -347,7 +348,7 @@ fn val_proxy_010_same_session_reuses_hop() {
             "--proxy-country".into(),
             "US".into(),
             "--proxy-class".into(),
-            "residential".into(),
+            "datacenter".into(),
             "--no-js".into(),
             "--robots".into(),
             "ignore".into(),
@@ -392,11 +393,11 @@ fn val_proxy_010_same_session_reuses_hop() {
     assert_eq!(g.hops[1].session.as_deref(), Some("S1"));
     assert_eq!(
         proof1["egress"]["proxy_class"].as_str(),
-        Some("residential")
+        Some("datacenter")
     );
     assert_eq!(
         proof2["egress"]["proxy_class"].as_str(),
-        Some("residential")
+        Some("datacenter")
     );
     assert_no_secret(&proof1.to_string());
     assert_no_secret(&proof2.to_string());
@@ -591,6 +592,7 @@ fn val_proxy_021_required_class_dead_upstream_fails_closed() {
 
 // ---------------------------------------------------------------------------
 // VAL-PROXY-023/024/025 — credentials / secret-bearing username redaction
+// Soft-path redaction uses datacenter; residential class forces Chromium (VAL-STEALTH).
 // ---------------------------------------------------------------------------
 #[test]
 fn val_proxy_023_024_025_credentials_and_secret_username_redacted() {
@@ -608,7 +610,7 @@ fn val_proxy_023_024_025_credentials_and_secret_username_redacted() {
             "--proxy-country",
             "US",
             "--proxy-class",
-            "residential",
+            "datacenter",
             "--no-js",
             "--robots",
             "ignore",
@@ -628,7 +630,7 @@ fn val_proxy_023_024_025_credentials_and_secret_username_redacted() {
     assert_no_secret(&proof_s);
     assert_no_secret(&stderr);
     assert_no_secret(&stdout);
-    // Secret-bearing full residential username shape must not land in proof/logs.
+    // Secret-bearing full username shape must not land in proof/logs.
     let secret_username = format!("{SECRET_USER}-cc-US-sessid-redact1");
     assert!(
         !proof_s.contains(&secret_username),
@@ -643,6 +645,7 @@ fn val_proxy_023_024_025_credentials_and_secret_username_redacted() {
 
 // ---------------------------------------------------------------------------
 // VAL-PROXY-026 / 027 / 028 — truthful egress.proxy_class
+// Explicit soft-path class is datacenter (residential requires Chromium).
 // ---------------------------------------------------------------------------
 #[test]
 fn val_proxy_026_proxied_scrape_emits_truthful_class() {
@@ -650,13 +653,13 @@ fn val_proxy_026_proxied_scrape_emits_truthful_class() {
     let (proxy_base, log, stop) = spawn_sticky_http_connect_mock(true);
     let proxy = proxy_url_with_creds(&proxy_base);
 
-    let out_res = run_proxy_scrape(
+    let out_explicit = run_proxy_scrape(
         &[
             &origin,
             "--proxy",
             &proxy,
             "--proxy-class",
-            "residential",
+            "datacenter",
             "--proxy-session",
             "cls1",
             "--no-js",
@@ -669,8 +672,8 @@ fn val_proxy_026_proxied_scrape_emits_truthful_class() {
         ],
         &[],
     );
-    let proof = assert_scrape_ok(&out_res);
-    assert_eq!(proof["egress"]["proxy_class"].as_str(), Some("residential"));
+    let proof = assert_scrape_ok(&out_explicit);
+    assert_eq!(proof["egress"]["proxy_class"].as_str(), Some("datacenter"));
     assert!(!log.lock().expect("log").hops.is_empty());
 
     // Default configured upstream (no --proxy-class) is truthful datacenter.

@@ -488,6 +488,8 @@ fn val_proxy_022_bind_conflict_api_fails_closed() {
 
 // ---------------------------------------------------------------------------
 // VAL-PROXY-018/019 — soft rustls + Chromium share dialer identity (session)
+// Soft + Chromium dual-path sticky must use a non-hard class (datacenter).
+// Residential forces Chromium-only under VAL-STEALTH-001/017; soft --no-js is refused there.
 // ---------------------------------------------------------------------------
 #[test]
 fn val_proxy_018_019_soft_and_chromium_share_sticky_session() {
@@ -506,7 +508,7 @@ fn val_proxy_018_019_soft_and_chromium_share_sticky_session() {
             "--proxy-country",
             "US",
             "--proxy-class",
-            "residential",
+            "datacenter",
             "--no-js",
             "--robots",
             "ignore",
@@ -520,7 +522,7 @@ fn val_proxy_018_019_soft_and_chromium_share_sticky_session() {
     let soft_proof = assert_scrape_ok(&soft);
     assert_eq!(
         soft_proof["egress"]["proxy_class"].as_str(),
-        Some("residential")
+        Some("datacenter")
     );
 
     // Chromium path (html forces render → composer).
@@ -534,7 +536,7 @@ fn val_proxy_018_019_soft_and_chromium_share_sticky_session() {
             "--proxy-country",
             "US",
             "--proxy-class",
-            "residential",
+            "datacenter",
             "--robots",
             "ignore",
             "--formats",
@@ -549,7 +551,7 @@ fn val_proxy_018_019_soft_and_chromium_share_sticky_session() {
     let chrome_proof = assert_scrape_ok(&chrome);
     assert_eq!(
         chrome_proof["egress"]["proxy_class"].as_str(),
-        Some("residential")
+        Some("datacenter")
     );
     stop.store(true, Ordering::SeqCst);
 
