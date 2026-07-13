@@ -7,6 +7,8 @@
 <a href="docs/architecture.md">Architecture</a> ·
 <a href="docs/SECURITY.md">Security</a> ·
 <a href="docs/TRUST_MODEL.md">Trust model</a> ·
+<a href="docs/operators/proxy-and-egress.md">Proxy & egress</a> ·
+<a href="docs/operators/product-breadth-and-extract.md">Breadth & extract</a> ·
 <a href="docs/tcb-inventory.md">TCB inventory</a> ·
 <a href="docs/image-rotation-on-cve.md">Image rotation</a>
 
@@ -21,7 +23,7 @@
 
 basecrawl is an Apache-2.0 Rust workspace for platforms that need scrape evidence, not just page body text. It fetches content, captures TLS and render artifacts, and emits a canonical **ScrapeProof** JSON object. An optional Phala TDX path binds scrape hashes into a hardware quote via dstack.
 
-The model is **cryptographically-anchored trust-but-audit**. A verifying quote on an allowlisted measurement is strong evidence that the scrape ran inside a pinned CVM image with bound hashes. It is not a claim of absolute or trustless authenticity. Residual risk (including TEE.fail on self-hosted DDR5) is documented in the security docs.
+The model is **cryptographically-anchored trust-but-audit**. A verifying quote on an allowlisted measurement is strong evidence that the scrape ran inside a pinned CVM image with bound hashes. It is not a claim of absolute authenticity. Residual risk (including TEE.fail on self-hosted DDR5) is documented in the security docs.
 
 Who it serves: relay/miners and any operator that must prove what was fetched under controlled software and network assumptions. What it is not: a general-purpose anonymous proxy, a CDN, or a guarantee against every hardware or vendor residual.
 
@@ -71,6 +73,8 @@ For crate boundaries, proof fields, and validation layers, see [docs/architectur
 | --- | --- | --- |
 | Engineers | [Architecture](docs/architecture.md) | Crates, ScrapeProof flow, mermaid |
 | Operators / reviewers | [Security](docs/SECURITY.md) | Residuals, TEE.fail, operator checklist |
+| Operators | [Proxy & egress](docs/operators/proxy-and-egress.md) | Universal proxy flags, composer, stealth baseline |
+| Operators | [Breadth & extract](docs/operators/product-breadth-and-extract.md) | POST/crawl/map/batch + gated json extract |
 | Verifiers | [Trust model](docs/TRUST_MODEL.md) | What a proof means; honesty language |
 | Image maintainers | [TCB inventory](docs/tcb-inventory.md) | Measured surfaces and pins |
 | Image maintainers | [Image rotation on CVE](docs/image-rotation-on-cve.md) | Digest-pinned rebuild and allowlist swap |
@@ -120,6 +124,20 @@ basecrawl --wait-for "#ready" --render-timeout 30 --viewport 1280x800 \
   --screenshot-full-page --screenshot-out /tmp/page.png \
   https://example.com/
 
+# product breadth: POST (soft path), crawl MVP, map-lite, batch
+basecrawl --method POST --body '{"q":1}' --header 'Content-Type: application/json' \
+  --no-js https://example.com/api
+basecrawl --mode crawl --max-crawl-pages 5 --max-depth 1 https://example.com/
+basecrawl --mode map --max-urls 50 https://example.com/
+basecrawl --mode batch --urls https://example.com/,https://example.org/ --concurrency 2
+
+# universal proxy (set BASECRAWL_HTTPS_PROXY in the environment; never commit credentials)
+basecrawl --proxy-class residential --proxy-session s1 --proxy-country US \
+  --formats markdown,metadata https://example.com/
+
+# structured json extract is gated (unsupported without extractor / key; never forged success)
+basecrawl --formats json --schema '{"type":"object"}' --prompt 'title' https://example.com/
+
 # TEE path: TDX quote + enclave signature via /var/run/dstack.sock
 basecrawl --attest --task-id JOB-1 --nonce once-abc \
   --formats markdown,metadata,rawHtml --timeout 60 --no-js \
@@ -128,9 +146,13 @@ basecrawl --attest --task-id JOB-1 --nonce once-abc \
 
 Useful flags: `--header`, `--cookie`, `--auth-header`, `--basic-auth`, `--no-js`, `--actions`, `--follow-pagination` / `--max-pages`, `--robots`, `--fingerprint-seed`, `--sign-proof`, `--insecure` (diagnostic only), `--verbose`.
 
+Proxy / hard path: `--proxy`, `--proxy-session`, `--proxy-country`, `--proxy-username-template`, `--proxy-class`, `--difficulty`, `--force-browser`, `--keep-browser-profile`. See [proxy and egress](docs/operators/proxy-and-egress.md). Credentials stay in env/file only.
+
+Extract honesty: `--formats json` with `--json-schema` / `--json-prompt` fails closed without a live extractor (`structured_extraction_unsupported` or `invalid_json_schema`). Optional env keys: `BASECRAWL_EXTRACT_API_KEY` / `OPENAI_API_KEY`. Never fabricates empty success JSON. See [breadth and extract](docs/operators/product-breadth-and-extract.md).
+
 Proof surface (schema version 1) includes `request`, `tls`, `response`, `result`, `egress`, `attestation`, and `sdk_signature`. With `--attest` / `--sign-proof` the proof binds request/cert/transcript/response/result hashes and the Ed25519 public key into TDX `report_data`, then signs the envelope with the enclave key.
 
-Supporting capabilities: seeded fingerprints, in-enclave DoH privacy for DNS, landmark RTT echo, sealed task decrypt / result seal, and digest-pinned CVM images.
+Supporting capabilities: seeded fingerprints, universal proxy + Chromium composer, stealth hard-path baseline, in-enclave DoH privacy for DNS, landmark RTT echo, sealed task decrypt / result seal, and digest-pinned CVM images. Residual risk (proxy is not anonymity, TEE.fail, headless limits) is in [SECURITY.md](docs/SECURITY.md).
 
 ## CVM image
 

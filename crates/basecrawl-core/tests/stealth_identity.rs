@@ -505,7 +505,11 @@ fn val_stealth_015_help_does_not_claim_undetectable() {
     let probe = |parts: &[&str]| parts.concat();
     let forbidden = [
         probe(&["tru", "st", "less"]),
-        format!("{}{}", probe(&["1", "00", "% "]), probe(&["guaran", "teed"])),
+        format!(
+            "{}{}",
+            probe(&["1", "00", "% "]),
+            probe(&["guaran", "teed"])
+        ),
         probe(&["defeat ", "all"]),
         probe(&["bypass ", "all bot"]),
         format!("{} stealth", probe(&["guaran", "teed"])),

@@ -15,6 +15,7 @@ pub mod crawl;
 pub mod document;
 pub mod egress;
 pub mod error;
+pub mod extract;
 pub mod fetch;
 pub mod format;
 pub mod html;
@@ -45,6 +46,11 @@ use url::Url;
 pub use basecrawl_proof::ScrapeProof;
 pub use basecrawl_render::{Action, ScrollDirection};
 pub use error::Error;
+pub use error::ExtractRefuseReason;
+pub use extract::{
+    gate_structured_extraction, provider_key_is_configured, validate_schema_text,
+    ExtractProviderConfig, EXTRACT_API_KEY_ENVS, EXTRACT_HONESTY_HELP,
+};
 // Host-safe panic / label helpers for bindings and CLI (VAL-CONF-018..031).
 pub use basecrawl_seal::{
     host_safe_panic_message, install_host_safe_panic_hook, task_id_ref, HostSafeLabels,
@@ -152,6 +158,13 @@ pub struct ScrapeOptions {
     /// When true (default), wipe the sticky Chromium profile when the scrape ends so the next
     /// distinct task_id starts clean without operator process surgery (VAL-STEALTH-014).
     pub wipe_profile_on_complete: bool,
+    /// Optional JSON Schema text for structured `json` extraction (`--json-schema` / `--schema`).
+    /// Validated when `formats` includes `json`; missing provider/extractor fails closed with a
+    /// structured error and never invents fields (VAL-CRAWLPROD-024..027).
+    pub json_schema: Option<String>,
+    /// Optional natural-language extract prompt (`--json-prompt` / `--prompt`). Gated with schema;
+    /// does not alone enable forged success.
+    pub json_prompt: Option<String>,
 }
 
 impl Default for ScrapeOptions {
@@ -193,6 +206,8 @@ impl Default for ScrapeOptions {
             difficulty: None,
             force_browser: false,
             wipe_profile_on_complete: true,
+            json_schema: None,
+            json_prompt: None,
         }
     }
 }
@@ -215,11 +230,19 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
     let method = product_request::normalize_method(Some(options.method.as_str()))?;
     product_request::validate_method_body(&method, &options.body)?;
 
-    // JSON structured extraction depends on an optional LLM-backed capability that is not part of
-    // this deterministic M1 image. Refuse it before robots/fetch/render work so callers never
-    // receive a successful proof that misleadingly contains `json: null`.
+    // JSON structured extraction is gated and honest: validate schema when present, then refuse
+    // without a configured provider/extractor. Never emit success with empty/fake `json` fields
+    // (VAL-CRAWLPROD-024..027, VAL-CRAWL-127). Whole-request refusal when `json` is requested so
+    // other formats are not silently half-produced (VAL-CRAWLPROD-029: clean unit reject).
     if formats.contains(&Format::Json) {
-        return Err(Error::StructuredExtractionUnsupported);
+        extract::gate_structured_extraction(
+            options.json_schema.as_deref(),
+            options.json_prompt.as_deref(),
+        )?;
+        // Live path never returns Ok above in this build; keep the belt based on that invariant.
+        return Err(Error::StructuredExtractionUnsupported {
+            reason: ExtractRefuseReason::ExtractorNotAvailable,
+        });
     }
 
     // Resolve the per-miner/per-task fingerprint seed first so every outgoing client dimension

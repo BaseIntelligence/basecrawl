@@ -119,6 +119,36 @@ Authenticity is **cryptographically-anchored trust-but-audit**. Measurement matc
 - Operator pins the six-field measurement tuple in the platform allowlist; rotated via the [image rotation runbook](image-rotation-on-cve.md).
 - Compose and offline measurement tools: `image/Dockerfile`, `image/docker-compose.yml`, `image/allowlist.json`, `image/reproducibility.py`.
 
+## Proxy composer and hard path (product topology)
+
+```mermaid
+flowchart TB
+  CLI[CLI or SDK]
+  Core[basecrawl-core]
+  Soft[Soft rustls path]
+  Hard[Hard Chromium path]
+  Comp[Loopback SOCKS composer]
+  Up[Universal proxy upstream]
+  Origin[Origin]
+
+  CLI --> Core
+  Core -->|soft or no-js| Soft
+  Core -->|residential hard JS| Hard
+  Soft --> Up
+  Hard --> Comp
+  Comp -->|DoH pin then CONNECT| Up
+  Soft --> Origin
+  Up --> Origin
+```
+
+- Soft path dials CONNECT/SOCKS directly when a proxy URL/env is set.
+- Hard path (residential/mobile, `--difficulty hard`, `--force-browser`) uses Chromium plus the loopback composer so sealed DoH is preserved before upstream dial.
+- Emit truthful `egress.proxy_class` and `egress.fetch_path`; fail closed on required-class dial failures.
+
+## Structured extract gate
+
+Formats include `json` as a **request token**. Without a configured provider key and a live extractor that returns real structured data, the scrape fails closed with `structured_extraction_unsupported` (or `invalid_json_schema`). The product never writes success proofs with empty or fabricated extract objects. Operator walkthrough: [operators/product-breadth-and-extract.md](operators/product-breadth-and-extract.md).
+
 ## Bindings
 
 `basecrawl-ffi` exposes the C ABI. Thin wrappers:

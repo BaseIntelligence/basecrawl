@@ -391,14 +391,8 @@ fn val_proxy_010_same_session_reuses_hop() {
     );
     assert_eq!(g.hops[0].session.as_deref(), Some("S1"));
     assert_eq!(g.hops[1].session.as_deref(), Some("S1"));
-    assert_eq!(
-        proof1["egress"]["proxy_class"].as_str(),
-        Some("datacenter")
-    );
-    assert_eq!(
-        proof2["egress"]["proxy_class"].as_str(),
-        Some("datacenter")
-    );
+    assert_eq!(proof1["egress"]["proxy_class"].as_str(), Some("datacenter"));
+    assert_eq!(proof2["egress"]["proxy_class"].as_str(), Some("datacenter"));
     assert_no_secret(&proof1.to_string());
     assert_no_secret(&proof2.to_string());
     assert_no_secret(&String::from_utf8_lossy(&out1.stderr));

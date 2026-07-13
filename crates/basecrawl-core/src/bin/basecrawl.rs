@@ -87,11 +87,17 @@ struct Cli {
 
     /// Comma-separated output formats: markdown, html, rawHtml, links, metadata, screenshot, json
     /// [default: markdown,metadata].
+    ///
+    /// Structured `json` extract is gated: requires a configured extractor/provider key
+    /// (BASECRAWL_EXTRACT_API_KEY or OPENAI_API_KEY) and still fails closed when no live extractor
+    /// is available. This build never fabricates schema results or always-extract claims.
     #[arg(long, value_delimiter = ',', value_name = "FORMATS")]
     formats: Option<Vec<String>>,
 
-    /// JSON Schema describing the requested structured extraction. The current deterministic
-    /// image accepts this request syntax but explicitly reports JSON extraction as unavailable.
+    /// JSON Schema for structured `json` extraction. Must be a JSON object when set.
+    /// Invalid schema fails structured (`invalid_json_schema`). Even with a valid schema,
+    /// extraction is provider-gated and never returns fabricated success without a live
+    /// extractor (see Formats flag help for residual honesty).
     #[arg(
         long = "json-schema",
         visible_alias = "schema",
@@ -99,9 +105,9 @@ struct Cli {
     )]
     json_schema: Option<String>,
 
-    /// Natural-language instruction for the requested structured extraction. The current
-    /// deterministic image accepts this request syntax but explicitly reports JSON extraction as
-    /// unavailable.
+    /// Natural-language instruction for structured `json` extraction. Optional; still
+    /// provider-gated. Missing key / missing live extractor yields a structured unsupported
+    /// error rather than invented fields.
     #[arg(long = "json-prompt", visible_alias = "prompt", value_name = "PROMPT")]
     json_prompt: Option<String>,
 
@@ -279,7 +285,9 @@ fn run(cli: Cli) -> Result<String, Error> {
         return Err(Error::UnsupportedOutput(cli.output));
     }
 
-    let _json_extraction_request = (cli.json_schema, cli.json_prompt);
+    // Capture extract args for the gate; secrets never come from CLI flags.
+    let json_schema = cli.json_schema.clone();
+    let json_prompt = cli.json_prompt.clone();
     let mode = cli.mode.to_ascii_lowercase();
 
     // Validate formats before any fetch so an unknown format never triggers a network request.
@@ -401,6 +409,8 @@ fn run(cli: Cli) -> Result<String, Error> {
         difficulty,
         force_browser: cli.force_browser,
         wipe_profile_on_complete: !cli.keep_browser_profile,
+        json_schema,
+        json_prompt,
     };
 
     match mode.as_str() {

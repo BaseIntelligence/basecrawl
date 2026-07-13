@@ -13,6 +13,27 @@ use basecrawl_seal::{
 use serde_json::{json, Value};
 use thiserror::Error;
 
+/// Why structured extraction was refused. Serialized into the host-safe error `reason` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtractRefuseReason {
+    /// No provider key in the env stack (default install).
+    ProviderNotConfigured,
+    /// A key (and optionally base URL) is present, but this build has no live extractor.
+    ExtractorNotAvailable,
+    /// Key present and wire attempted, but the provider call failed or returned unusable data.
+    ProviderCallFailed,
+}
+
+impl ExtractRefuseReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExtractRefuseReason::ProviderNotConfigured => "provider_not_configured",
+            ExtractRefuseReason::ExtractorNotAvailable => "extractor_not_available",
+            ExtractRefuseReason::ProviderCallFailed => "provider_call_failed",
+        }
+    }
+}
+
 /// Keys in structured robots / policy payloads whose values are URL-shaped and must be
 /// host-safe-digested before they leave the enclave as error JSON.
 const URL_SHAPED_JSON_KEYS: &[&str] = &[
@@ -45,8 +66,14 @@ pub enum Error {
     #[error("unsupported output format '{0}' (only 'json' is supported)")]
     UnsupportedOutput(String),
 
-    #[error("structured extraction for the 'json' format is unavailable in this build")]
-    StructuredExtractionUnsupported,
+    /// Structured `json` extract refused (missing provider key and/or no live extractor).
+    /// Never a silent success with empty/fake fields (VAL-CRAWLPROD-024/027).
+    #[error("structured extraction for the 'json' format is unavailable ({})", reason.as_str())]
+    StructuredExtractionUnsupported { reason: ExtractRefuseReason },
+
+    /// Caller-supplied `--json-schema` is not a usable JSON object (VAL-CRAWLPROD-025).
+    #[error("invalid json schema: {detail}")]
+    InvalidJsonSchema { detail: String },
 
     #[error("invalid request header '{0}' (expected 'Name: Value')")]
     InvalidHeader(String),
@@ -154,7 +181,8 @@ impl Error {
             Error::UnsupportedScheme(_) => "unsupported_scheme",
             Error::UnknownFormat { .. } => "invalid_format",
             Error::UnsupportedOutput(_) => "unsupported_output",
-            Error::StructuredExtractionUnsupported => "structured_extraction_unsupported",
+            Error::StructuredExtractionUnsupported { .. } => "structured_extraction_unsupported",
+            Error::InvalidJsonSchema { .. } => "invalid_json_schema",
             Error::InvalidHeader(_) => "invalid_header",
             Error::UnsupportedMethod(_) => "unsupported_method",
             Error::PostNotSupportedOnHardPath => "post_not_supported_on_hard_path",
@@ -231,13 +259,21 @@ impl Error {
                     Value::String(negotiated_version.clone()),
                 );
             }
-            Error::StructuredExtractionUnsupported => {
+            Error::StructuredExtractionUnsupported { reason } => {
                 obj.insert("format".into(), Value::String("json".into()));
                 obj.insert(
                     "capability".into(),
                     Value::String("structured_extraction".into()),
                 );
-                obj.insert("reason".into(), Value::String("not_built".into()));
+                obj.insert("reason".into(), Value::String(reason.as_str().into()));
+            }
+            Error::InvalidJsonSchema { detail } => {
+                obj.insert("format".into(), Value::String("json".into()));
+                obj.insert(
+                    "capability".into(),
+                    Value::String("structured_extraction".into()),
+                );
+                obj.insert("schema_error".into(), Value::String(detail.clone()));
             }
             Error::UnsupportedMethod(method) => {
                 obj.insert("method".into(), Value::String(method.clone()));

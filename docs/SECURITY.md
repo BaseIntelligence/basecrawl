@@ -30,8 +30,27 @@ The measured TCB is minimized and enumerated in [tcb-inventory.md](tcb-inventory
 
 On the sealed/TEE path, basecrawl aims for **content-confidentiality** (host does not see path/query/headers/cookies/body/result plaintext), not target-anonymity. Destination IP, SNI (absent ECH), DoH resolver destination, and traffic metadata remain expected residual leakage to a proxy-operating host.
 
+## Proxy, composer, and stealth residual
+
+Universal proxy support (HTTP CONNECT / SOCKS5, sticky/session and country username tokens) and the Chromium hard-path composer improve operational success. They do **not** make scrapes anonymous, and they do not defeat every commercial bot system.
+
+| Residual | Notes |
+| --- | --- |
+| Upstream proxy operator | Sees exit traffic to origins; credentials must stay env-only, never in proofs or logs. |
+| Network metadata | Even with sealed DoH on the hard path, traffic shape and destination residual exist outside content confidentiality. |
+| Headless / automation heuristics | Stealth baseline lowers trivial signals (`webdriver`, obvious automation flags); sites may still classify the client. |
+| Class forgery | Product fails closed when residential/mobile is required but upstream is unavailable; never advertise a forged class on success. |
+
+Operator flag reference: [operators/proxy-and-egress.md](operators/proxy-and-egress.md).
+
+## Structured extract residual
+
+`--formats json` is request syntax only when no live extractor/provider is configured. The engine reports structured `structured_extraction_unsupported` / `invalid_json_schema` rather than inventing schema fields. Optional provider keys (`BASECRAWL_EXTRACT_API_KEY`, `OPENAI_API_KEY`) do not authorize empty fake success. See [operators/product-breadth-and-extract.md](operators/product-breadth-and-extract.md).
+
 ## Operator checklist
 
 1. Prefer managed-cloud placement for confidential scrapes.
 2. Keep image builds reproducible and digest-pinned; rotate on CVE per [image-rotation-on-cve.md](image-rotation-on-cve.md).
 3. Never advertise absolute-trust language in tooling or docs.
+4. Keep proxy and LLM/extract keys in gitignored env files; never in ScrapeProof or CI logs.
+5. Treat residential success as topology improvement, not anonymity.
