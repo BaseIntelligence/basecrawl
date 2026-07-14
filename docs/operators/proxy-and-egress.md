@@ -110,6 +110,10 @@ Do not market this as "undetectable" or "defeats all bot vendors." It is an iden
 | Headless residual | Headless is default (`--headless=new`). Such traits remain detectable; sticky profiles and residential egress only raise the bar. Do not advertise perfect headless cloaking. |
 | CDP Runtime residual | CDP/Runtime protocol use (including possible Runtime.enable side effects) is a residual channel even when trivial automation flags are patched. Documented in [SECURITY.md](../SECURITY.md). |
 | Chromium major residual | Pin is major **145** (`145.0.7632.46`). Detectors can track lag vs newer public Chrome; keep hard-path majors coherent when the pin moves. |
+| Plugins / mimeTypes | Multipass PDF plugin names + non-empty `mimeTypes` improve trivial bot ranks only. Not full plugin/PDF API fidelity. |
+| Canvas | Canvas seed noise diversifies render digests; it is not anonymity and never claims un-fingerprintability. See [SECURITY.md](../SECURITY.md). |
+| Fonts | No complete OS font inventory spoof; font residual remains. Do not market full font anonymity. |
+| Permissions | `permissions.query({name:'notifications'})` is aligned with `Notification.permission` when both exist; other PermissionName values are residual. |
 | TEE.fail (self-hosted) | Physical DDR5 interposer residual; prefer managed-cloud TDX for high-stakes confidential work. See [SECURITY.md](../SECURITY.md). |
 | Network metadata | Sealed DNS / content confidentiality do not erase all host-owned network observables. |
 | Provider spend | Live residential sessions cost money; use sticky short sessions and rate limits. |

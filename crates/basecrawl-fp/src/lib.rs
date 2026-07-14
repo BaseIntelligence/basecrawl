@@ -77,8 +77,12 @@ pub const USER_AGENTS: &[&str] = &[
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
 ];
 
-/// Plausible hardwareConcurrency values the seed may legalize (VAL-STEALTH-009).
+/// Plausible hardwareConcurrency values the seed may legalize (VAL-STEALTH-009 / VAL-FPRINT-010).
 pub const HARDWARE_CONCURRENCY: &[u32] = &[2, 4, 6, 8, 12, 16];
+
+/// Plausible `navigator.deviceMemory` GiB values (power-of-two-ish Chromium surface).
+/// VAL-FPRINT-009: finite positive when exposed.
+pub const DEVICE_MEMORY: &[u32] = &[2, 4, 8];
 
 /// Viewport dimensions (CSS px @ device-scale-factor 1) the seed may legalize.
 pub const VIEWPORTS: &[(u32, u32)] = &[
@@ -90,6 +94,28 @@ pub const VIEWPORTS: &[(u32, u32)] = &[
     (1280, 720),
     (1600, 900),
     (1680, 1050),
+];
+
+/// Screen outer dimensions paired with VIEWPORTS indices (must be ≥ viewport; VAL-FPRINT-008).
+/// `(width, height, avail_width, avail_height, color_depth)`.
+pub const SCREEN_GEOMETRY: &[(u32, u32, u32, u32, u32)] = &[
+    (1280, 800, 1280, 760, 24),
+    (1366, 768, 1366, 728, 24),
+    (1440, 900, 1440, 860, 24),
+    (1536, 864, 1536, 824, 24),
+    (1920, 1080, 1920, 1040, 24),
+    (1280, 720, 1280, 680, 24),
+    (1600, 900, 1600, 860, 24),
+    (1680, 1050, 1680, 1010, 24),
+];
+
+/// Chromium-style multipass plugin inventory names (not a single-PDF stub; VAL-FPRINT-003).
+pub const PLUGIN_INVENTORY: &[&str] = &[
+    "PDF Viewer",
+    "Chrome PDF Viewer",
+    "Chromium PDF Viewer",
+    "Microsoft Edge PDF Viewer",
+    "WebKit built-in PDF",
 ];
 
 /// IANA timezones the seed may select.
@@ -210,8 +236,22 @@ pub struct FingerprintProfile {
     pub ja4: String,
     /// Platform token for CDP `set_user_agent` (derived from the UA string).
     pub platform: String,
-    /// Positive `navigator.hardwareConcurrency` value (VAL-STEALTH-009).
+    /// Positive `navigator.hardwareConcurrency` value (VAL-STEALTH-009 / VAL-FPRINT-010).
     pub hardware_concurrency: u32,
+    /// Finite positive `navigator.deviceMemory` GiB when exposed (VAL-FPRINT-009).
+    pub device_memory: u32,
+    /// `screen.width` (CSS px); ≥ viewport width (VAL-FPRINT-008).
+    pub screen_width: u32,
+    /// `screen.height` (CSS px); ≥ viewport height.
+    pub screen_height: u32,
+    /// `screen.availWidth`.
+    pub screen_avail_width: u32,
+    /// `screen.availHeight`.
+    pub screen_avail_height: u32,
+    /// `screen.colorDepth` / `pixelDepth` (typically 24).
+    pub screen_color_depth: u32,
+    /// Multipass plugin inventory length (VAL-FPRINT-003/004); always matches PLUGIN_INVENTORY.
+    pub plugins_length: u32,
     /// Chrome major version extracted from `user_agent` (coherent with CH-UA).
     pub chrome_major: u32,
     /// Full Chrome version string used for Client Hints (`Sec-CH-UA-Full-Version-List`).
@@ -339,6 +379,15 @@ pub fn generate(seed_input: &str) -> FingerprintProfile {
     let webgl_vendor = WEBGL_VENDORS[webgl_idx].to_string();
     let canvas_noise = stream.lane(8).next_u64();
     let hardware_concurrency = *pick(&stream.lane(9), HARDWARE_CONCURRENCY);
+    // Screen geometry is bound to the viewport slot so screen ≥ viewport (VAL-FPRINT-008).
+    let viewport_idx = VIEWPORTS
+        .iter()
+        .position(|&(w, h)| w == viewport_width && h == viewport_height)
+        .unwrap_or(0);
+    let (screen_width, screen_height, screen_avail_width, screen_avail_height, screen_color_depth) =
+        SCREEN_GEOMETRY[viewport_idx.min(SCREEN_GEOMETRY.len() - 1)];
+    let device_memory = *pick(&stream.lane(10), DEVICE_MEMORY);
+    let plugins_length = PLUGIN_INVENTORY.len() as u32;
     let (chrome_major, chrome_full_version) = chrome_versions_for_ua(&user_agent);
 
     let accept_language = accept_language_for(&locale);
@@ -376,6 +425,13 @@ pub fn generate(seed_input: &str) -> FingerprintProfile {
         ja4,
         platform,
         hardware_concurrency,
+        device_memory,
+        screen_width,
+        screen_height,
+        screen_avail_width,
+        screen_avail_height,
+        screen_color_depth,
+        plugins_length,
         chrome_major,
         chrome_full_version,
     }
@@ -425,6 +481,14 @@ pub fn is_within_parameter_space(profile: &FingerprintProfile) -> bool {
         && WEBGL_VENDORS.contains(&profile.webgl_vendor.as_str())
         && HARDWARE_CONCURRENCY.contains(&profile.hardware_concurrency)
         && profile.hardware_concurrency > 0
+        && DEVICE_MEMORY.contains(&profile.device_memory)
+        && profile.device_memory > 0
+        && profile.screen_width >= profile.viewport_width
+        && profile.screen_height >= profile.viewport_height
+        && profile.screen_avail_width > 0
+        && profile.screen_avail_height > 0
+        && profile.screen_color_depth > 0
+        && profile.plugins_length == PLUGIN_INVENTORY.len() as u32
         && profile.chrome_major > 0
         && chrome_versions_for_ua(&profile.user_agent)
             == (profile.chrome_major, profile.chrome_full_version.clone())
@@ -478,14 +542,22 @@ pub fn effective_fingerprint_headers(
 ///   (VAL-CDP-002/005)
 /// - forces `navigator.webdriver` false (VAL-STEALTH-004 / VAL-CDP-001)
 /// - pins `navigator.language` / `navigator.languages` to the profile locale
-/// - pins a positive `navigator.hardwareConcurrency` (VAL-STEALTH-009)
+/// - pins a positive `navigator.hardwareConcurrency` (VAL-STEALTH-009 / VAL-FPRINT-010)
+/// - exposes finite positive `navigator.deviceMemory` (VAL-FPRINT-009)
+/// - multipass `navigator.plugins` + coherent `mimeTypes` (VAL-FPRINT-003/004), not a
+///   single-PDF-only stub
+/// - coherent `screen` geometry ≥ viewport (VAL-FPRINT-008)
+/// - consistent `permissions.query({{name:'notifications'}})` with `Notification.permission`
+///   when available (VAL-FPRINT-005)
 /// - presents a plausible `window.chrome` surface and a coherent `chrome.runtime` policy
 ///   (VAL-FPRINT-001/002): non-throwing common reads; `runtime.id` stays `undefined` for
 ///   non-extension pages (honest residual, not a half-implemented extension host)
-/// - injects canvas / WebGL noise so rendering fingerprints differ per seed
+/// - injects canvas / WebGL noise so rendering fingerprints differ per seed — **diversity only**,
+///   never cryptographic anonymity / un-fingerprintability (VAL-FPRINT-015)
 ///
 /// This is a hard-path identity **baseline** under TDX; it does **not** claim an undetectable,
-/// universal bot-defeat, anonymous, or 100% success posture. Never embeds proxy/task secrets.
+/// universal bot-defeat, anonymous, font-complete OS inventory spoof, or 100% success posture.
+/// Never embeds proxy/task secrets.
 pub fn browser_injection_script(profile: &FingerprintProfile) -> String {
     let locale = serde_json::to_string(&profile.locale).unwrap_or_else(|_| "\"en-US\"".into());
     let short_locale = profile.locale.split('-').next().unwrap_or("en");
@@ -496,8 +568,16 @@ pub fn browser_injection_script(profile: &FingerprintProfile) -> String {
         serde_json::to_string(&profile.webgl_renderer).unwrap_or_else(|_| "\"ANGLE\"".into());
     let noise = profile.canvas_noise;
     let hardware = profile.hardware_concurrency.max(1);
+    let device_memory = profile.device_memory.max(1);
+    let screen_w = profile.screen_width.max(profile.viewport_width).max(1);
+    let screen_h = profile.screen_height.max(profile.viewport_height).max(1);
+    let avail_w = profile.screen_avail_width.max(1).min(screen_w);
+    let avail_h = profile.screen_avail_height.max(1).min(screen_h);
+    let color_depth = profile.screen_color_depth.max(1);
     let platform =
         serde_json::to_string(&profile.platform).unwrap_or_else(|_| "\"Linux x86_64\"".into());
+    let plugin_names_json = serde_json::to_string(&PLUGIN_INVENTORY.to_vec())
+        .unwrap_or_else(|_| r#"["PDF Viewer"]"#.into());
     // Secrets must never enter this string (VAL-CDP-009): only seed-derived surface values.
     format!(
         r#"(function() {{
@@ -518,7 +598,14 @@ pub fn browser_injection_script(profile: &FingerprintProfile) -> String {
   const locale = {locale};
   const shortLocale = {short_locale_json};
   const hardwareConcurrency = {hardware};
+  const deviceMemory = {device_memory};
   const platform = {platform};
+  const screenWidth = {screen_w};
+  const screenHeight = {screen_h};
+  const screenAvailWidth = {avail_w};
+  const screenAvailHeight = {avail_h};
+  const screenColorDepth = {color_depth};
+  const pluginNames = {plugin_names_json};
 
   const installWebdriverFalse = () => {{
     const getter = () => false;
@@ -550,6 +637,77 @@ pub fn browser_injection_script(profile: &FingerprintProfile) -> String {
   }};
   installWebdriverFalse();
 
+  // Multipass Chromium PDF plugin inventory (VAL-FPRINT-003) + matching mimeTypes (VAL-FPRINT-004).
+  // This is a plugin-name surface only; it is not a complete OS font inventory spoof (VAL-FPRINT-018).
+  const makePluginArray = () => {{
+    const mimeType = {{
+      type: 'application/pdf',
+      suffixes: 'pdf',
+      description: 'Portable Document Format',
+      enabledPlugin: null
+    }};
+    const list = [];
+    for (let i = 0; i < pluginNames.length; i++) {{
+      const plugin = {{
+        name: pluginNames[i],
+        filename: 'internal-pdf-viewer',
+        description: 'Portable Document Format',
+        length: 1,
+        0: mimeType,
+        item: function (idx) {{ return idx === 0 ? mimeType : null; }},
+        namedItem: function (n) {{ return n === 'application/pdf' ? mimeType : null; }}
+      }};
+      list.push(plugin);
+    }}
+    // Cross-link mimeType.enabledPlugin to first plugin for classic detector walks.
+    try {{ mimeType.enabledPlugin = list[0]; }} catch (_) {{}}
+    const plugins = {{
+      length: list.length,
+      item: function (idx) {{ return list[idx] || null; }},
+      namedItem: function (name) {{
+        for (let i = 0; i < list.length; i++) {{
+          if (list[i].name === name) return list[i];
+        }}
+        return null;
+      }},
+      refresh: function () {{}}
+    }};
+    for (let i = 0; i < list.length; i++) {{
+      plugins[i] = list[i];
+      try {{ plugins[list[i].name] = list[i]; }} catch (_) {{}}
+    }}
+    return plugins;
+  }};
+  const makeMimeTypeArray = (plugins) => {{
+    const pdf = {{
+      type: 'application/pdf',
+      suffixes: 'pdf',
+      description: 'Portable Document Format',
+      enabledPlugin: plugins && plugins[0] ? plugins[0] : null
+    }};
+    const textPdf = {{
+      type: 'text/pdf',
+      suffixes: 'pdf',
+      description: 'Portable Document Format',
+      enabledPlugin: plugins && plugins[0] ? plugins[0] : null
+    }};
+    const mimes = {{
+      length: 2,
+      0: pdf,
+      1: textPdf,
+      item: function (idx) {{ return this[idx] || null; }},
+      namedItem: function (name) {{
+        if (name === 'application/pdf') return pdf;
+        if (name === 'text/pdf') return textPdf;
+        return null;
+      }}
+    }};
+    try {{ mimes['application/pdf'] = pdf; mimes['text/pdf'] = textPdf; }} catch (_) {{}}
+    return mimes;
+  }};
+  const pluginArray = makePluginArray();
+  const mimeTypeArray = makeMimeTypeArray(pluginArray);
+
   try {{
     Object.defineProperty(Navigator.prototype, 'language', {{ get: () => locale, configurable: true }});
     Object.defineProperty(Navigator.prototype, 'languages', {{
@@ -560,20 +718,134 @@ pub fn browser_injection_script(profile: &FingerprintProfile) -> String {
       get: () => hardwareConcurrency,
       configurable: true
     }});
-    Object.defineProperty(Navigator.prototype, 'platform', {{ get: () => platform, configurable: true }});
-    Object.defineProperty(Navigator.prototype, 'plugins', {{
-      get: () => {{
-        const fake = {{ length: 1, 0: {{ name: 'PDF Viewer' }}, item: function() {{ return this[0]; }} }};
-        return fake;
-      }},
+    Object.defineProperty(Navigator.prototype, 'deviceMemory', {{
+      get: () => deviceMemory,
       configurable: true
     }});
+    Object.defineProperty(Navigator.prototype, 'platform', {{ get: () => platform, configurable: true }});
+    Object.defineProperty(Navigator.prototype, 'plugins', {{
+      get: () => pluginArray,
+      configurable: true
+    }});
+    Object.defineProperty(Navigator.prototype, 'mimeTypes', {{
+      get: () => mimeTypeArray,
+      configurable: true
+    }});
+  }} catch (_) {{}}
+
+  // Screen geometry coherent with viewport (VAL-FPRINT-008): positive, non-zero, screen ≥ viewport.
+  try {{
+    if (typeof Screen !== 'undefined' && Screen.prototype) {{
+      Object.defineProperty(Screen.prototype, 'width', {{ get: () => screenWidth, configurable: true }});
+      Object.defineProperty(Screen.prototype, 'height', {{ get: () => screenHeight, configurable: true }});
+      Object.defineProperty(Screen.prototype, 'availWidth', {{ get: () => screenAvailWidth, configurable: true }});
+      Object.defineProperty(Screen.prototype, 'availHeight', {{ get: () => screenAvailHeight, configurable: true }});
+      Object.defineProperty(Screen.prototype, 'colorDepth', {{ get: () => screenColorDepth, configurable: true }});
+      Object.defineProperty(Screen.prototype, 'pixelDepth', {{ get: () => screenColorDepth, configurable: true }});
+    }}
+  }} catch (_) {{}}
+  try {{
+    if (typeof screen !== 'undefined' && screen) {{
+      Object.defineProperty(screen, 'width', {{ get: () => screenWidth, configurable: true }});
+      Object.defineProperty(screen, 'height', {{ get: () => screenHeight, configurable: true }});
+      Object.defineProperty(screen, 'availWidth', {{ get: () => screenAvailWidth, configurable: true }});
+      Object.defineProperty(screen, 'availHeight', {{ get: () => screenAvailHeight, configurable: true }});
+      Object.defineProperty(screen, 'colorDepth', {{ get: () => screenColorDepth, configurable: true }});
+      Object.defineProperty(screen, 'pixelDepth', {{ get: () => screenColorDepth, configurable: true }});
+    }}
+  }} catch (_) {{}}
+
+  // permissions.query(notifications) consistency with Notification.permission (VAL-FPRINT-005).
+  try {{
+    const mapNotificationToPermissionState = (perm) => {{
+      if (perm === 'granted' || perm === 'denied' || perm === 'default' || perm === 'prompt') {{
+        return perm === 'default' ? 'prompt' : perm;
+      }}
+      return 'prompt';
+    }};
+    const installPermissionsQuery = () => {{
+      if (!navigator.permissions || typeof navigator.permissions.query !== 'function') {{
+        // Provide a minimal Permissions surface so automation detectors do not see a missing API
+        // uniqueness — state still resolves coherently with Notification.permission.
+        try {{
+          const permissions = {{
+            query: function (desc) {{
+              return Promise.resolve().then(function () {{
+                const name = desc && desc.name;
+                if (name === 'notifications') {{
+                  let notif = 'default';
+                  try {{
+                    if (typeof Notification !== 'undefined' && Notification.permission) {{
+                      notif = Notification.permission;
+                    }}
+                  }} catch (_) {{}}
+                  return {{ state: mapNotificationToPermissionState(notif), onchange: null }};
+                }}
+                return {{ state: 'prompt', onchange: null }};
+              }});
+            }}
+          }};
+          Object.defineProperty(Navigator.prototype, 'permissions', {{
+            get: () => permissions,
+            configurable: true
+          }});
+        }} catch (_) {{}}
+        return;
+      }}
+      const originalQuery = navigator.permissions.query.bind(navigator.permissions);
+      const patchedQuery = function (desc) {{
+        const name = desc && desc.name;
+        if (name === 'notifications') {{
+          return Promise.resolve().then(function () {{
+            let notif = 'default';
+            try {{
+              if (typeof Notification !== 'undefined' && Notification.permission) {{
+                notif = Notification.permission;
+              }}
+            }} catch (_) {{}}
+            const state = mapNotificationToPermissionState(notif);
+            // Prefer original when it already agrees; fall back to coherent state otherwise.
+            return originalQuery(desc).then(function (status) {{
+              try {{
+                if (status && typeof status.state === 'string') {{
+                  const expected = state;
+                  if (status.state === expected || status.state === 'prompt' || status.state === 'denied' || status.state === 'granted') {{
+                    // Keep browser value when already in formal set; force-align if diverged fully.
+                    if (status.state !== expected && expected !== 'prompt') {{
+                      try {{
+                        Object.defineProperty(status, 'state', {{ get: () => expected, configurable: true }});
+                      }} catch (_) {{}}
+                    }}
+                    return status;
+                  }}
+                }}
+              }} catch (_) {{}}
+              return {{ state: state, onchange: null }};
+            }}).catch(function () {{
+              return {{ state: state, onchange: null }};
+            }});
+          }});
+        }}
+        return originalQuery(desc);
+      }};
+      try {{
+        navigator.permissions.query = patchedQuery;
+      }} catch (_) {{
+        try {{
+          Object.defineProperty(navigator.permissions, 'query', {{
+            value: patchedQuery,
+            configurable: true
+          }});
+        }} catch (_) {{}}
+      }}
+    }};
+    installPermissionsQuery();
   }} catch (_) {{}}
 
   // Plausible Chromium chrome surface (VAL-FPRINT-001) + runtime policy (VAL-FPRINT-002).
   // Policy: present a non-throwing chrome object. For pages without an extension context,
   // chrome.runtime exists with id === undefined (standard Chromium residual), and common
-  // method slots are non-throwing'stubs' that reject rather than explode on property access.
+  // method slots are non-throwing stubs that reject rather than explode on property access.
   try {{
     const ensureChrome = () => {{
       if (typeof window.chrome === 'undefined' || window.chrome === null) {{
@@ -676,6 +948,8 @@ pub fn browser_injection_script(profile: &FingerprintProfile) -> String {
     ensureChrome();
   }} catch (_) {{}}
 
+  // Canvas noise is best-effort seed diversity only (VAL-FPRINT-015). It does not claim
+  // cryptographic anonymity, un-fingerprintability, or complete font inventory spoof.
   const canvasNoise = {noise} >>> 0;
   const patchCanvas = (proto) => {{
     if (!proto || !proto.getImageData) return;
@@ -725,7 +999,14 @@ pub fn browser_injection_script(profile: &FingerprintProfile) -> String {
         vendor = vendor,
         renderer = renderer,
         hardware = hardware,
+        device_memory = device_memory,
+        screen_w = screen_w,
+        screen_h = screen_h,
+        avail_w = avail_w,
+        avail_h = avail_h,
+        color_depth = color_depth,
         platform = platform,
+        plugin_names_json = plugin_names_json,
     )
 }
 
@@ -1240,13 +1521,30 @@ mod tests {
         assert!(script.contains("__bcStealthInstalled"));
         assert!(script.contains("window.chrome") || script.contains("chrome"));
         assert!(script.contains("runtime"));
-        // Never embed void credentials or marketing absolute claims.
+        // M19 deeper surface: multipass plugins + mimeTypes + permissions + screen + memory.
+        assert!(script.contains("deviceMemory"));
+        assert!(script.contains(&profile.device_memory.to_string()));
+        assert!(script.contains("mimeTypes"));
+        assert!(script.contains("pluginNames"));
+        assert!(script.contains("PDF Viewer"));
+        assert!(script.contains("Chrome PDF Viewer") || script.contains("Chromium PDF Viewer"));
+        assert!(script.contains("permissions"));
+        assert!(script.contains("notifications"));
+        assert!(script.contains("screenWidth") || script.contains("availWidth"));
+        assert!(script.contains(&profile.screen_width.to_string()));
+        assert!(script.contains(&profile.screen_color_depth.to_string()));
+        // Canvas diversity is RESIDUAL only — never anonymous / un-fingerprintable claims.
+        assert!(
+            script.contains("best-effort seed diversity")
+                || script.contains("VAL-FPRINT-015")
+                || script.contains("does not claim")
+        );
+        // Never embed credentials or marketplace tokens. Residual denial of anonymity/fonts is OK.
         for banned in [
             "oxylabs",
             "2captcha",
             "undetectable",
             "trustless",
-            "anonymous",
             "pr.oxylabs.io",
             "openai_api_key",
         ] {
@@ -1255,6 +1553,57 @@ mod tests {
                 "inject must not embed banned token {banned}"
             );
         }
+        // Affirmative absolute anonymity marketing without residual denial would fail greppable honesty.
+        let lower = script.to_ascii_lowercase();
+        assert!(
+            !lower.contains("guarantees anonymity") && !lower.contains("makes browser anonymous"),
+            "must not market browser anonymity"
+        );
+    }
+
+    #[test]
+    fn val_fprint_008_009_010_016_deeper_dims_seed_stable_and_bounded() {
+        let a = generate("fprint-depth-seed-a");
+        let b = generate("fprint-depth-seed-a");
+        assert_eq!(a.hardware_concurrency, b.hardware_concurrency);
+        assert_eq!(a.device_memory, b.device_memory);
+        assert_eq!(a.screen_width, b.screen_width);
+        assert_eq!(a.screen_height, b.screen_height);
+        assert_eq!(a.screen_avail_width, b.screen_avail_width);
+        assert_eq!(a.screen_color_depth, b.screen_color_depth);
+        assert_eq!(a.plugins_length, b.plugins_length);
+        assert!(a.device_memory > 0 && DEVICE_MEMORY.contains(&a.device_memory));
+        assert!(a.hardware_concurrency > 0);
+        assert!(a.screen_width >= a.viewport_width);
+        assert!(a.screen_height >= a.viewport_height);
+        assert!(a.screen_color_depth > 0);
+        assert_eq!(a.plugins_length, PLUGIN_INVENTORY.len() as u32);
+        assert!(
+            a.plugins_length > 1,
+            "multipass plugins, not single PDF stub"
+        );
+    }
+
+    #[test]
+    fn val_fprint_017_different_seeds_diversify_non_crypto_dims() {
+        let mut found = false;
+        for i in 0..48u32 {
+            let a = generate(&format!("fprint-div-a-{i}"));
+            let b = generate(&format!("fprint-div-b-{i}"));
+            if a.hardware_concurrency != b.hardware_concurrency
+                || a.device_memory != b.device_memory
+                || a.locale != b.locale
+                || a.webgl_renderer != b.webgl_renderer
+                || a.viewport_width != b.viewport_width
+            {
+                found = true;
+                break;
+            }
+        }
+        assert!(
+            found,
+            "different seeds must diversify at least one non-crypto deeper dim"
+        );
     }
 
     #[test]
