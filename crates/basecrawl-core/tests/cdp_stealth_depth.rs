@@ -370,6 +370,7 @@ fn val_cdp_010_canary_ports_only_mission_range() {
     // Default suite never imports captcha marketplace tokens.
     let profile = generate("cdp-range-seed");
     let script = browser_injection_script(&profile);
+    // Absolute claim strings below are forbidden / must never appear in inject.
     for banned in [
         "2captcha",
         "anti-captcha",
@@ -377,8 +378,8 @@ fn val_cdp_010_canary_ports_only_mission_range() {
         "capmonster",
         "oxylabs.io",
         "undetectable",
-        "trustless",
-        "100% guaranteed",
+        "trustless",       // must never claim
+        "100% guaranteed", // forbidden claim pattern denylist
     ] {
         assert!(
             !script.to_ascii_lowercase().contains(banned),
@@ -840,12 +841,13 @@ fn val_cdp_003_fprint_014_unlock_014_residual_honesty_in_product_surfaces() {
     );
     // Use multi-word absolute claims only: short tokens may appear inside honest negation
     // phrases if copywriters reverse polarity ("not X"), so gate on full claim language.
+    // Absolute claim strings below are forbidden / must never appear in CLI help.
     for banned in [
         "passes all headless detectors",
-        "100% guaranteed",
+        "100% guaranteed", // forbidden claim pattern denylist
         "cdp residual fully eliminated",
         "no cdp leak forever",
-        "trustless scrape",
+        "trustless scrape", // must never claim
         "fully undetectable",
     ] {
         assert!(
@@ -883,11 +885,12 @@ fn val_cdp_003_fprint_014_unlock_014_residual_honesty_in_product_surfaces() {
         "residual docs must note Chromium major pin residual (VAL-UNLOCK-014)"
     );
     // Positive absolute marketing claims only (honest residual prose must still talk about residuals).
+    // Absolute claim strings below are forbidden / must never appear in residual docs.
     for banned in [
         "we are undetectable",
         "fully eliminates cdp residual",
-        "trustless scrape authenticity",
-        "100% guaranteed authenticity",
+        "trustless scrape authenticity", // must never claim
+        "100% guaranteed authenticity",  // forbidden claim pattern denylist
         "anonymous residential exit",
     ] {
         assert!(
