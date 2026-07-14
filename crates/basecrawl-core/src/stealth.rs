@@ -247,25 +247,49 @@ pub fn stealth_argv_is_clean(args: &[&str]) -> bool {
             .any(|arg| arg.contains("disable-blink-features=AutomationControlled"))
 }
 
-/// Detect classic challenge interstitials so hard-path blocks are not entries as silent success
-/// (VAL-STEALTH-016).
+/// Detect classic challenge / captcha interstitials so hard-path blocks are never scored as
+/// silent primary-content success (VAL-STEALTH-016, VAL-UNLOCK-001/002/018).
+///
+/// Pure, deterministic pure-function of `(html, status_code)`: same inputs always yield the same
+/// decision. Detect only — never invent a solve path, marketplace call, or success upgrade.
 pub fn looks_like_challenge_interstitial(html: &str, status_code: u16) -> bool {
+    let lower = html.to_ascii_lowercase();
     if matches!(status_code, 401 | 403 | 429 | 503) {
-        // Only treat as challenge-ish when body also looks defensive; bare 403 pages may be real.
-        let lower = html.to_ascii_lowercase();
+        // Only treat wrap statuses as challenge-ish when body also looks defensive; bare 403s may be real.
         return lower.contains("captcha")
             || lower.contains("cf-mitigated")
             || lower.contains("just a moment")
             || lower.contains("attention required")
             || lower.contains("access denied")
             || lower.contains("bot detection")
-            || lower.contains("challenge-platform");
+            || lower.contains("challenge-platform")
+            || lower.contains("cf-browser-verification")
+            || lower.contains("cf-challenge")
+            || lower.contains("turnstile");
     }
-    let lower = html.to_ascii_lowercase();
-    (lower.contains("just a moment") && lower.contains("cloudflare"))
+    // 2xx / other: require multi-signal interstitial markers so ordinary content is not false-positive.
+    // Captcha widget pages (Turnstile / reCAPTCHA shells) are never primary userdata success
+    // (VAL-UNLOCK-002). Marketplace solve is out of scope forever (VAL-UNLOCK-003).
+    let cf_challenge = (lower.contains("just a moment") && lower.contains("cloudflare"))
         || lower.contains("cf-browser-verification")
         || lower.contains("cf-challenge")
-        || (lower.contains("turnstile") && lower.contains("challenge"))
+        || lower.contains("challenge-platform")
+        || (lower.contains("checking your browser") && lower.contains("cloudflare"));
+    let turnstile_or_recaptcha = (lower.contains("turnstile")
+        && (lower.contains("challenge")
+            || lower.contains("cf-turnstile")
+            || lower.contains("data-sitekey")))
+        || lower.contains("g-recaptcha")
+        || lower.contains("h-captcha")
+        || lower.contains("hcaptcha")
+        || (lower.contains("captcha")
+            && (lower.contains("data-sitekey")
+                || lower.contains("verify you are human")
+                || lower.contains("complete the captcha")
+                || lower.contains("captcha-form")
+                || lower.contains("recaptcha")));
+    cf_challenge
+        || turnstile_or_recaptcha
         || lower.contains("hdn-captcha")
         || lower.contains("permanent redirect to a captcha")
 }
@@ -365,5 +389,23 @@ mod tests {
             "--enable-automation",
             "--disable-blink-features=AutomationControlled",
         ]));
+    }
+
+    #[test]
+    fn challenge_detect_is_deterministic_for_cf_and_captcha() {
+        let cf = r#"<title>Just a moment...</title><span>cloudflare</span> challenge-platform cf-challenge"#;
+        let captcha = r#"<div class="g-recaptcha" data-sitekey="x"></div><form id="captcha-form">verify you are human</form>"#;
+        assert!(looks_like_challenge_interstitial(cf, 403));
+        assert!(looks_like_challenge_interstitial(cf, 403));
+        assert!(looks_like_challenge_interstitial(captcha, 200));
+        assert_eq!(
+            looks_like_challenge_interstitial(captcha, 200),
+            looks_like_challenge_interstitial(captcha, 200)
+        );
+        // Ordinary content is not a captcha interstitial.
+        assert!(!looks_like_challenge_interstitial(
+            "<html><body><h1>Hello bookstore</h1><p>price $10</p></body></html>",
+            200
+        ));
     }
 }
