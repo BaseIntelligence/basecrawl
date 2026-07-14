@@ -34,6 +34,9 @@ pub fn capture_until(
         RenderError::ResourceBudgetExceeded => Error::ResourceBudgetExceeded,
         RenderError::DnsIsolation(detail) => Error::DnsIsolation(detail),
         RenderError::DocumentPolicyDenied(detail) => Error::from_document_policy_denial(detail),
+        RenderError::StealthInjectInstall(detail) => {
+            Error::HardPath(format!("stealth inject install failed: {detail}"))
+        }
         error => Error::Render(error.to_string()),
     })
 }

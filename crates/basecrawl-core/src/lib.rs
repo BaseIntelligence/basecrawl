@@ -155,6 +155,12 @@ pub struct ScrapeOptions {
     pub difficulty: Option<stealth::SiteDifficulty>,
     /// Explicitly force the hard Chromium path (sticky stealth identity), even for soft targets.
     pub force_browser: bool,
+    /// Install the hard-path CDP `Page.addScriptToEvaluateOnNewDocument` stealth inject.
+    ///
+    /// Default true. When hard / residential identity is required, disabling this fails closed
+    /// rather than emitting raw automation surface as silent stealth success (VAL-CDP-008).
+    /// Soft-path scrapes that do not force Chromium may leave this false without consequence.
+    pub stealth_inject: bool,
     /// When true (default), wipe the sticky Chromium profile when the scrape ends so the next
     /// distinct task_id starts clean without operator process surgery (VAL-STEALTH-014).
     pub wipe_profile_on_complete: bool,
@@ -205,6 +211,7 @@ impl Default for ScrapeOptions {
             proxy_class: None,
             difficulty: None,
             force_browser: false,
+            stealth_inject: true,
             wipe_profile_on_complete: true,
             json_schema: None,
             json_prompt: None,
@@ -328,6 +335,21 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
     // continues on rustls without browser identity so body transmission stays honest.
     if method.eq_ignore_ascii_case("POST") && hard_required {
         return Err(Error::PostNotSupportedOnHardPath);
+    }
+    // VAL-CDP-008: hard / residential identity requires the early document stealth inject. Disabling
+    // it (CLI flag or env) fails closed — never claim hard-path success with raw automation surface.
+    let stealth_inject_enabled = options.stealth_inject
+        && !std::env::var("BASECRAWL_DISABLE_STEALTH_INJECT")
+            .map(|v| {
+                let t = v.trim();
+                t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
+            })
+            .unwrap_or(false);
+    if hard_required && !stealth_inject_enabled {
+        return Err(Error::HardPath(
+            "stealth inject is required on the hard Chromium path; refuse silent success without Page.addScriptToEvaluateOnNewDocument install (VAL-CDP-008)"
+                .into(),
+        ));
     }
     let will_use_browser = if method.eq_ignore_ascii_case("POST") {
         // Soft POST body framing is only implemented on the rustls path.
@@ -489,11 +511,17 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
                 platform: Some(fingerprint.platform.clone()),
                 timezone: Some(fingerprint.timezone.clone()),
                 locale: Some(fingerprint.locale.clone()),
-                fingerprint_script: Some(basecrawl_fp::browser_injection_script(&fingerprint)),
+                fingerprint_script: if stealth_inject_enabled {
+                    Some(basecrawl_fp::browser_injection_script(&fingerprint))
+                } else {
+                    None
+                },
                 window_size: Some((fingerprint.viewport_width, fingerprint.viewport_height)),
                 sealed_socks: chromium_composer.clone(),
                 user_data_dir: sticky_profile_dir.clone(),
                 stealth: true,
+                // VAL-CDP-001/008: hard path requires early inject; soft optional path may skip.
+                require_stealth_inject: hard_required,
                 chrome_full_version: Some(fingerprint.chrome_full_version.clone()),
                 chrome_major: Some(fingerprint.chrome_major),
                 ..basecrawl_render::RenderConfig::default()
@@ -606,12 +634,15 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
                         platform: Some(fingerprint.platform.clone()),
                         timezone: Some(fingerprint.timezone.clone()),
                         locale: Some(fingerprint.locale.clone()),
-                        fingerprint_script: Some(basecrawl_fp::browser_injection_script(
-                            &fingerprint,
-                        )),
+                        fingerprint_script: if stealth_inject_enabled {
+                            Some(basecrawl_fp::browser_injection_script(&fingerprint))
+                        } else {
+                            None
+                        },
                         sealed_socks: chromium_composer.clone(),
                         user_data_dir: sticky_profile_dir.clone(),
                         stealth: true,
+                        require_stealth_inject: hard_required,
                         chrome_full_version: Some(fingerprint.chrome_full_version.clone()),
                         chrome_major: Some(fingerprint.chrome_major),
                     },
@@ -898,6 +929,27 @@ fn crawl_page(
         charset::decode_body(&fetched.body, fetched.content_type.as_deref(), is_html);
     redact_sensitive_request_echoes(&mut body_str, &options.headers);
     let page_base = Url::parse(&fetched.final_url).unwrap_or_else(|_| url.clone());
+    // Multipage hops share the hard-path inject policy of the parent scrape (VAL-CDP-004).
+    let hard_required = stealth::requires_chromium_hard_path(stealth::HardPathDecision {
+        proxy_class: options.proxy_class,
+        difficulty: options.difficulty,
+        force_browser: options.force_browser,
+        render_enabled: options.render_enabled,
+        needs_browser_formats: true,
+    });
+    let stealth_inject_enabled = options.stealth_inject
+        && !std::env::var("BASECRAWL_DISABLE_STEALTH_INJECT")
+            .map(|v| {
+                let t = v.trim();
+                t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
+            })
+            .unwrap_or(false);
+    if hard_required && !stealth_inject_enabled {
+        return Err(Error::HardPath(
+            "stealth inject is required on the hard Chromium path; refuse silent success without Page.addScriptToEvaluateOnNewDocument install (VAL-CDP-008)"
+                .into(),
+        ));
+    }
     let source = if options.render_enabled && is_html && !body_str.trim().is_empty() {
         let mut rendered = html::render_page_until(
             &page_base,
@@ -919,11 +971,16 @@ fn crawl_page(
                 platform: Some(fingerprint.platform.clone()),
                 timezone: Some(fingerprint.timezone.clone()),
                 locale: Some(fingerprint.locale.clone()),
-                fingerprint_script: Some(basecrawl_fp::browser_injection_script(fingerprint)),
+                fingerprint_script: if stealth_inject_enabled {
+                    Some(basecrawl_fp::browser_injection_script(fingerprint))
+                } else {
+                    None
+                },
                 window_size: Some((fingerprint.viewport_width, fingerprint.viewport_height)),
                 sealed_socks: chromium_composer,
                 user_data_dir: sticky_profile_dir,
                 stealth: true,
+                require_stealth_inject: hard_required,
                 chrome_full_version: Some(fingerprint.chrome_full_version.clone()),
                 chrome_major: Some(fingerprint.chrome_major),
                 ..basecrawl_render::RenderConfig::default()

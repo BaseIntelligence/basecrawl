@@ -99,6 +99,9 @@ pub enum RenderError {
     ResourceBudgetExceeded,
     #[error("top-level document policy denied navigation: {0}")]
     DocumentPolicyDenied(String),
+    /// Hard-path stealth inject could not be installed before content probe (VAL-CDP-008).
+    #[error("stealth inject install failed: {0}")]
+    StealthInjectInstall(String),
     #[error("browser returned no serialized DOM")]
     NoContent,
 }
@@ -233,6 +236,11 @@ pub struct RenderConfig {
     /// AutomationControlled blink feature, and (via injection) force `navigator.webdriver` false.
     /// This is a success-rate baseline under TDX, not an "undetectable" claim.
     pub stealth: bool,
+    /// When true, hard-path policy requires a non-empty `fingerprint_script` to install via
+    /// `Page.addScriptToEvaluateOnNewDocument` **before** the first content navigation probe
+    /// (VAL-CDP-001/008). Missing/empty/failing install fails closed with
+    /// [`RenderError::StealthInjectInstall`].
+    pub require_stealth_inject: bool,
     /// Full Chrome version for Client Hints metadata (aligned with pinned Chromium / UA).
     pub chrome_full_version: Option<String>,
     /// Chrome major version used for `Sec-CH-UA` brand list (VAL-STEALTH-003/006).
@@ -271,6 +279,7 @@ impl Default for RenderConfig {
             sealed_socks: None,
             user_data_dir: None,
             stealth: true,
+            require_stealth_inject: false,
             chrome_full_version: None,
             chrome_major: None,
         }
@@ -1398,6 +1407,42 @@ for(var k=0;k<nodes.length;k++){var n=nodes[k];if(n.parentNode){n.parentNode.rem
 return document.documentElement.outerHTML;\
 })()";
 
+/// Install the hard-path fingerprint/stealth script via CDP before the first navigation.
+///
+/// VAL-CDP-001: must run before content probes. VAL-CDP-008: hard path (`require`) fails closed
+/// when the script is missing, empty, or Install rejects. Only one fingerprint inject is added
+/// (idempotent product script owns dual-evaluate guards — VAL-CDP-002).
+fn install_stealth_inject_on_new_document(
+    tab: &Tab,
+    deadline: Instant,
+    timeout: Duration,
+    script: Option<&str>,
+    require: bool,
+) -> Result<(), RenderError> {
+    match script {
+        Some(source) if !source.trim().is_empty() => {
+            set_tab_deadline(tab, deadline, timeout)?;
+            tab.call_method(Page::AddScriptToEvaluateOnNewDocument {
+                source: source.to_string(),
+                world_name: None,
+                include_command_line_api: None,
+                run_immediately: Some(true),
+            })
+            .map_err(|e| {
+                RenderError::StealthInjectInstall(format!(
+                    "Page.addScriptToEvaluateOnNewDocument failed: {e}"
+                ))
+            })?;
+            Ok(())
+        }
+        _ if require => Err(RenderError::StealthInjectInstall(
+            "hard path requires a non-empty stealth inject before content navigation (VAL-CDP-008)"
+                .into(),
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Installed (via `Page.addScriptToEvaluateOnNewDocument`) before any page script runs, so that
 /// every `fetch`/`XMLHttpRequest` the page issues (including deferred requests fired long after
 /// load) is counted. It maintains an in-flight counter and a last-activity timestamp that the
@@ -1590,6 +1635,17 @@ pub fn render_until(
         },
     )?;
 
+    // VAL-CDP-001: install the hard-path stealth inject BEFORE the first content navigation so
+    // early document probes (inline head scripts) observe the patched surface. Network-idle
+    // tracker is a separate product helper and intentionally does not touch navigator/chrome.
+    install_stealth_inject_on_new_document(
+        &tab,
+        deadline,
+        config.timeout,
+        config.fingerprint_script.as_deref(),
+        config.require_stealth_inject,
+    )?;
+
     // Install the network in-flight tracker before any page script runs so the smart wait can see
     // fetch/XHR the page issues, including deferred requests.
     set_tab_deadline(&tab, deadline, config.timeout)?;
@@ -1600,19 +1656,6 @@ pub fn render_until(
         run_immediately: Some(true),
     })
     .map_err(|e| RenderError::Render(e.to_string()))?;
-
-    // Seeded canvas/WebGL + navigator script (VAL-ANTIBOT-035) runs before page scripts so the
-    // document fingerprints the measured generator profile rather than the fixed Chromium build.
-    if let Some(script) = config.fingerprint_script.as_ref() {
-        set_tab_deadline(&tab, deadline, config.timeout)?;
-        tab.call_method(Page::AddScriptToEvaluateOnNewDocument {
-            source: script.clone(),
-            world_name: None,
-            include_command_line_api: None,
-            run_immediately: Some(true),
-        })
-        .map_err(|e| RenderError::Render(e.to_string()))?;
-    }
 
     browser.complete_setup();
     set_tab_deadline(&tab, deadline, config.timeout)?;
@@ -1996,6 +2039,8 @@ pub struct ScreenshotConfig {
     pub user_data_dir: Option<PathBuf>,
     /// Hard-path stealth launch baseline (see [`RenderConfig::stealth`]).
     pub stealth: bool,
+    /// When true, screenshot path also requires early inject install (VAL-CDP-001/008).
+    pub require_stealth_inject: bool,
     /// Full Chrome version for Client Hints metadata.
     pub chrome_full_version: Option<String>,
     /// Chrome major for `Sec-CH-UA`.
@@ -2027,6 +2072,7 @@ impl Default for ScreenshotConfig {
             sealed_socks: None,
             user_data_dir: None,
             stealth: true,
+            require_stealth_inject: false,
             chrome_full_version: None,
             chrome_major: None,
         }
@@ -2118,16 +2164,14 @@ pub fn screenshot_until(
         config.timezone.as_deref(),
         config.locale.as_deref(),
     )?;
-    if let Some(script) = config.fingerprint_script.as_ref() {
-        set_tab_deadline(&tab, deadline, config.timeout)?;
-        tab.call_method(Page::AddScriptToEvaluateOnNewDocument {
-            source: script.clone(),
-            world_name: None,
-            include_command_line_api: None,
-            run_immediately: Some(true),
-        })
-        .map_err(|e| RenderError::Render(e.to_string()))?;
-    }
+    // Early stealth inject before navigation (same policy as `render_until`).
+    install_stealth_inject_on_new_document(
+        &tab,
+        deadline,
+        config.timeout,
+        config.fingerprint_script.as_deref(),
+        config.require_stealth_inject,
+    )?;
     let resource_config = RenderConfig {
         request_headers: config.request_headers.clone(),
         credential_origin: config.credential_origin.clone(),
@@ -2143,6 +2187,10 @@ pub fn screenshot_until(
         timezone: config.timezone.clone(),
         locale: config.locale.clone(),
         fingerprint_script: config.fingerprint_script.clone(),
+        stealth: config.stealth,
+        require_stealth_inject: config.require_stealth_inject,
+        chrome_full_version: config.chrome_full_version.clone(),
+        chrome_major: config.chrome_major,
         ..RenderConfig::default()
     };
     set_tab_deadline(&tab, deadline, config.timeout)?;

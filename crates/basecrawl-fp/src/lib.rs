@@ -473,13 +473,18 @@ pub fn effective_fingerprint_headers(
 }
 
 /// Produce a JS snippet injected via CDP `Page.addScriptToEvaluateOnNewDocument` that:
-/// - forces `navigator.webdriver` false (VAL-STEALTH-004)
+/// - installs **once** (idempotent guard) so dual inject cannot re-expose automation flags
+///   (VAL-CDP-002/005)
+/// - forces `navigator.webdriver` false (VAL-STEALTH-004 / VAL-CDP-001)
 /// - pins `navigator.language` / `navigator.languages` to the profile locale
 /// - pins a positive `navigator.hardwareConcurrency` (VAL-STEALTH-009)
-/// - injects canvas `/` WebGL noise so rendering fingerprints differ per seed
+/// - presents a plausible `window.chrome` surface and a coherent `chrome.runtime` policy
+///   (VAL-FPRINT-001/002): non-throwing common reads; `runtime.id` stays `undefined` for
+///   non-extension pages (honest residual, not a half-implemented extension host)
+/// - injects canvas / WebGL noise so rendering fingerprints differ per seed
 ///
-/// This is a baseline hard-path identity surface under TDX; it does **not** claim an undetectable
-/// or universal bot-defeat posture.
+/// This is a hard-path identity **baseline** under TDX; it does **not** claim an undetectable,
+/// universal bot-defeat, anonymous, or 100% success posture. Never embeds proxy/task secrets.
 pub fn browser_injection_script(profile: &FingerprintProfile) -> String {
     let locale = serde_json::to_string(&profile.locale).unwrap_or_else(|_| "\"en-US\"".into());
     let short_locale = profile.locale.split('-').next().unwrap_or("en");
@@ -492,45 +497,190 @@ pub fn browser_injection_script(profile: &FingerprintProfile) -> String {
     let hardware = profile.hardware_concurrency.max(1);
     let platform =
         serde_json::to_string(&profile.platform).unwrap_or_else(|_| "\"Linux x86_64\"".into());
+    // Secrets must never enter this string (VAL-CDP-009): only seed-derived surface values.
     format!(
         r#"(function() {{
+  // Idempotent install identity (VAL-CDP-002): a second evaluate must no-op rather than thrash
+  // property descriptors / re-expose automation seams.
+  if (typeof window !== 'undefined' && window.__bcStealthInstalled) {{ return; }}
+  try {{
+    Object.defineProperty(window, '__bcStealthInstalled', {{
+      value: true,
+      configurable: false,
+      enumerable: false,
+      writable: false
+    }});
+  }} catch (_) {{
+    try {{ window.__bcStealthInstalled = true; }} catch (_) {{}}
+  }}
+
   const locale = {locale};
   const shortLocale = {short_locale_json};
   const hardwareConcurrency = {hardware};
   const platform = {platform};
+
+  const installWebdriverFalse = () => {{
+    const getter = () => false;
+    try {{
+      Object.defineProperty(Navigator.prototype, 'webdriver', {{
+        get: getter,
+        set: undefined,
+        configurable: true,
+        enumerable: true
+      }});
+    }} catch (_) {{}}
+    try {{
+      Object.defineProperty(navigator, 'webdriver', {{
+        get: getter,
+        set: undefined,
+        configurable: true,
+        enumerable: true
+      }});
+    }} catch (_) {{
+      try {{
+        if (navigator.webdriver) {{
+          Object.defineProperty(navigator, 'webdriver', {{
+            get: getter,
+            configurable: true
+          }});
+        }}
+      }} catch (_) {{}}
+    }}
+  }};
+  installWebdriverFalse();
+
   try {{
-    Object.defineProperty(Navigator.prototype, 'webdriver', {{
-      get: () => false,
+    Object.defineProperty(Navigator.prototype, 'language', {{ get: () => locale, configurable: true }});
+    Object.defineProperty(Navigator.prototype, 'languages', {{
+      get: () => Object.freeze([locale, shortLocale]),
       configurable: true
     }});
-  }} catch (_) {{}}
-  try {{
-    if (navigator.webdriver) {{
-      Object.defineProperty(navigator, 'webdriver', {{ get: () => false, configurable: true }});
-    }}
-  }} catch (_) {{}}
-  try {{
-    Object.defineProperty(Navigator.prototype, 'language', {{ get: () => locale }});
-    Object.defineProperty(Navigator.prototype, 'languages', {{
-      get: () => Object.freeze([locale, shortLocale])
-    }});
     Object.defineProperty(Navigator.prototype, 'hardwareConcurrency', {{
-      get: () => hardwareConcurrency
+      get: () => hardwareConcurrency,
+      configurable: true
     }});
-    Object.defineProperty(Navigator.prototype, 'platform', {{ get: () => platform }});
+    Object.defineProperty(Navigator.prototype, 'platform', {{ get: () => platform, configurable: true }});
     Object.defineProperty(Navigator.prototype, 'plugins', {{
       get: () => {{
         const fake = {{ length: 1, 0: {{ name: 'PDF Viewer' }}, item: function() {{ return this[0]; }} }};
         return fake;
-      }}
+      }},
+      configurable: true
     }});
+  }} catch (_) {{}}
+
+  // Plausible Chromium chrome surface (VAL-FPRINT-001) + runtime policy (VAL-FPRINT-002).
+  // Policy: present a non-throwing chrome object. For pages without an extension context,
+  // chrome.runtime exists with id === undefined (standard Chromium residual), and common
+  // method slots are non-throwing'stubs' that reject rather than explode on property access.
+  try {{
+    const ensureChrome = () => {{
+      if (typeof window.chrome === 'undefined' || window.chrome === null) {{
+        try {{
+          Object.defineProperty(window, 'chrome', {{
+            value: {{}},
+            configurable: true,
+            enumerable: true,
+            writable: true
+          }});
+        }} catch (_) {{
+          try {{ window.chrome = {{}}; }} catch (_) {{}}
+        }}
+      }}
+      if (!window.chrome || typeof window.chrome !== 'object') {{ return; }}
+      if (typeof window.chrome.runtime === 'undefined') {{
+        const runtime = {{
+          // Non-extension residual: id is undefined (not a fake extension UUID).
+          id: undefined,
+          connect: function () {{
+            throw new Error('Could not establish connection. Receiving end does not exist.');
+          }},
+          sendMessage: function () {{
+            // Match callback-style residual: invoke response with lastError, not an uncaught throw
+            // from mere property access. Calling the function still fails closed honestly.
+            const args = Array.prototype.slice.call(arguments);
+            const cb = typeof args[args.length - 1] === 'function' ? args[args.length - 1] : null;
+            try {{
+              if (window.chrome && window.chrome.runtime) {{
+                window.chrome.runtime.lastError = {{ message: 'Could not establish connection. Receiving end does not exist.' }};
+              }}
+            }} catch (_) {{}}
+            if (cb) {{
+              try {{ cb(); }} catch (_) {{}}
+            }}
+          }}
+        }};
+        try {{
+          Object.defineProperty(window.chrome, 'runtime', {{
+            value: runtime,
+            configurable: true,
+            enumerable: true,
+            writable: true
+          }});
+        }} catch (_) {{
+          try {{ window.chrome.runtime = runtime; }} catch (_) {{}}
+        }}
+      }} else if (window.chrome.runtime && typeof window.chrome.runtime === 'object') {{
+        // Coherent residual touches when a thin/host runtime already exists: ensure property
+        // access of `id` does not throw (undefined ok), and method slots are callable-or-missing
+        // without getter throw loops.
+        try {{ void window.chrome.runtime.id; }} catch (_) {{
+          try {{
+            Object.defineProperty(window.chrome.runtime, 'id', {{
+              value: undefined,
+              configurable: true
+            }});
+          }} catch (_) {{}}
+        }}
+      }}
+      // Minimal loadTimes/csi surface: present as functions when absent (common Chrome checks).
+      if (typeof window.chrome.loadTimes !== 'function') {{
+        try {{
+          window.chrome.loadTimes = function () {{
+            return {{
+              commitLoadTime: 0,
+              connectionInfo: 'http/1.1',
+              finishDocumentLoadTime: 0,
+              finishLoadTime: 0,
+              firstPaintAfterLoadTime: 0,
+              firstPaintTime: 0,
+              navigationType: 'Other',
+              npnNegotiatedProtocol: 'unknown',
+              requestTime: 0,
+              startLoadTime: 0,
+              wasAlternateProtocolAvailable: false,
+              wasFetchedViaSpdy: false,
+              wasNpnNegotiated: false
+            }};
+          }};
+        }} catch (_) {{}}
+      }}
+      if (typeof window.chrome.csi !== 'function') {{
+        try {{
+          window.chrome.csi = function () {{
+            return {{ startE: 0, onloadT: 0, pageT: 0, tran: 15 }};
+          }};
+        }} catch (_) {{}}
+      }}
+      if (typeof window.chrome.app === 'undefined') {{
+        try {{
+          window.chrome.app = {{
+            isInstalled: false,
+            InstallState: {{ DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }},
+            RunningState: {{ CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' }}
+          }};
+        }} catch (_) {{}}
+      }}
+    }};
+    ensureChrome();
   }} catch (_) {{}}
 
   const canvasNoise = {noise} >>> 0;
   const patchCanvas = (proto) => {{
     if (!proto || !proto.getImageData) return;
+    if (proto.getImageData.__bcPatched) return;
     const original = proto.getImageData;
-    proto.getImageData = function(x, y, w, h) {{
+    const patched = function(x, y, w, h) {{
       const image = original.apply(this, arguments);
       if (image && image.data && image.data.length > 0) {{
         const data = image.data;
@@ -540,6 +690,8 @@ pub fn browser_injection_script(profile: &FingerprintProfile) -> String {
       }}
       return image;
     }};
+    try {{ patched.__bcPatched = true; }} catch (_) {{}}
+    proto.getImageData = patched;
   }};
   try {{
     patchCanvas(CanvasRenderingContext2D && CanvasRenderingContext2D.prototype);
@@ -549,14 +701,17 @@ pub fn browser_injection_script(profile: &FingerprintProfile) -> String {
   const renderer = {renderer};
   const patchWebgl = (proto) => {{
     if (!proto || !proto.getParameter) return;
+    if (proto.getParameter.__bcPatched) return;
     const original = proto.getParameter;
-    proto.getParameter = function(parameter) {{
+    const patched = function(parameter) {{
       const UNMASKED_VENDOR_WEBGL = 0x9245;
       const UNMASKED_RENDERER_WEBGL = 0x9246;
       if (parameter === UNMASKED_VENDOR_WEBGL) return vendor;
       if (parameter === UNMASKED_RENDERER_WEBGL) return renderer;
       return original.apply(this, arguments);
     }};
+    try {{ patched.__bcPatched = true; }} catch (_) {{}}
+    proto.getParameter = patched;
   }};
   try {{
     patchWebgl(WebGLRenderingContext && WebGLRenderingContext.prototype);
@@ -1034,6 +1189,25 @@ mod tests {
         assert!(script.contains("webdriver"));
         assert!(script.contains("hardwareConcurrency"));
         assert!(script.contains(&profile.hardware_concurrency.to_string()));
+        // M18 surface: idempotent chrome / runtime policy, no dual-inject thrash.
+        assert!(script.contains("__bcStealthInstalled"));
+        assert!(script.contains("window.chrome") || script.contains("chrome"));
+        assert!(script.contains("runtime"));
+        // Never embed void credentials or marketing absolute claims.
+        for banned in [
+            "oxylabs",
+            "2captcha",
+            "undetectable",
+            "trustless",
+            "anonymous",
+            "pr.oxylabs.io",
+            "openai_api_key",
+        ] {
+            assert!(
+                !script.to_ascii_lowercase().contains(banned),
+                "inject must not embed banned token {banned}"
+            );
+        }
     }
 
     #[test]

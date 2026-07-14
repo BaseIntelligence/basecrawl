@@ -55,6 +55,9 @@ pub fn render_page_until(
         Err(RenderError::DocumentPolicyDenied(detail)) => {
             Err(Error::from_document_policy_denial(detail))
         }
+        Err(RenderError::StealthInjectInstall(detail)) => Err(Error::HardPath(format!(
+            "stealth inject install failed: {detail}"
+        ))),
         Err(e) => Err(Error::Render(e.to_string())),
     }
 }

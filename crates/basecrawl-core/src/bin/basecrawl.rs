@@ -274,6 +274,12 @@ struct Cli {
     #[arg(long = "force-browser", default_value_t = false)]
     force_browser: bool,
 
+    /// Disable the early CDP stealth inject (`Page.addScriptToEvaluateOnNewDocument`).
+    /// Hard / residential identity refuses success when inject is disabled (VAL-CDP-008).
+    /// Prefer this diagnostic toggle only on soft paths; never claim hard-path identity without inject.
+    #[arg(long = "disable-stealth-inject", default_value_t = false)]
+    disable_stealth_inject: bool,
+
     /// Keep the sticky Chromium profile on disk after the scrape (default: wipe on completion so
     /// the next task_id starts clean without operator process surgery).
     #[arg(long = "keep-browser-profile", default_value_t = false)]
@@ -408,6 +414,7 @@ fn run(cli: Cli) -> Result<String, Error> {
         proxy_class,
         difficulty,
         force_browser: cli.force_browser,
+        stealth_inject: !cli.disable_stealth_inject,
         wipe_profile_on_complete: !cli.keep_browser_profile,
         json_schema,
         json_prompt,
