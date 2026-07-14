@@ -1249,8 +1249,8 @@ fn inject_never_embeds_marketplace_or_absolute_trust() {
         "capsolver",
         "oxylabs.io",
         "undetectable",
-        "trustless", // must never claim
-        "100% guaranteed",
+        "trustless",       // must never claim
+        "100% guaranteed", // forbidden claim / must never claim
     ] {
         assert!(
             !script.to_ascii_lowercase().contains(banned),
