@@ -38,6 +38,8 @@ Universal proxy support (HTTP CONNECT / SOCKS5, sticky/session and country usern
 
 Unlocker-depth improves hard-path identity baseline (CDP injects, fingerprint depth, soft TLS vibe for soft targets only). It does **not** solve captchas and does **not** ship a captcha marketplace (no 2captcha / Anti-Captcha / CapSolver product surface). Challenge or captcha interstitials are **detect + fail-closed** (`challenge_blocked` class), never marketed as primary content success and never auto-solved by an external solver. This product does **not** claim commercial Web Unlocker feature-parity (Bright Data Web Unlocker / Oxylabs captcha-manage style "unlock any site" products). Success is scrape identity and egress honesty only.
 
+Optional live residual smoke (gated by `BASECRAWL_LIVE_PROXY=1`, max one concurrent residential dial, secrets only from gitignored `.env`) is **identity/egress residual only**. With the gate off, live residual cases skip cleanly and hermetic residual honesty remains primary. Live residual never requires captcha marketplace keys and never claims unlocker parity.
+
 ### Soft impersonate vs hard Chromium (identity split)
 
 | Path | What it is | What it is not |

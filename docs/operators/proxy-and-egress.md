@@ -115,6 +115,10 @@ Soft JA3-family alignment is for bootstrap/success-rate on soft targets. Residen
 
 Challenges and captcha pages are **detect-not-solve** (`challenge_blocked`). There is **no captcha marketplace** integration and **no** commercial Web Unlocker feature-parity claim (not Bright Data Web Unlocker / Oxylabs captcha-manage style "unlock any site"). Treat residual blocks as operational signal, not a defect in silence.
 
+### Gated live residual smoke (identity/egress only)
+
+Optional live residential residual smoke (`BASECRAWL_LIVE_PROXY=1`, max **1** concurrent dial family) exercises modern hard-path identity and truthful egress labels only. Secrets load from gitignored `.env` / process env (mode `600`). With the gate **off**, live residual cases **skip cleanly**; hermetic residual honesty stays primary. Live residual outcomes **never** claim commercial unlocker parity and **never** require captcha marketplace keys (2captcha / CapSolver / Anti-Captcha, etc.).
+
 ## Residual risks (operator)
 
 | Residual | Operator stance |
