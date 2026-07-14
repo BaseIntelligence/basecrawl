@@ -537,13 +537,15 @@ fn val_utls_008_help_honest_not_undetectable() {
     // Absolute stealth marketing is forbidden. Explicit denials ("never anonymity",
     // "residual bot detection") are honest residual language and allowed.
     // Claim forms that assert, rather than deny, absolute stealth are banned.
+    // Greppable honesty: each forbidden absolute-trust denylist literal line must
+    // include denial/meta markers so claims scanners do not false-fail (AGENTS.md).
     for claim in [
-        "is undetectable",
-        "fully undetectable",
-        "makes you anonymous",
-        "anonymity guarantee",
-        "100% success",
-        "trustless scrape",
+        "is undetectable",     // must never / forbidden claim
+        "fully undetectable",  // must never / forbidden claim
+        "makes you anonymous", // must never / forbidden claim
+        "anonymity guarantee", // must never / forbidden claim / not claim
+        "100% success",        // must never / forbidden claim / not claim
+        "trustless scrape",    // must never / forbidden claim / not claim
     ] {
         assert!(
             !lower.contains(claim),
