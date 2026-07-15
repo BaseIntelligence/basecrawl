@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+# Historical vendor tree retained for reference; publishable fork lives under crates/.
 exclude = ["vendor/headless_chrome"]
 members = [
     "bindings/node",
@@ -7,6 +8,7 @@ members = [
     "crates/basecrawl-core",
     "crates/basecrawl-ffi",
     "crates/basecrawl-fp",
+    "crates/basecrawl-headless-chrome",
     "crates/basecrawl-proof",
     "crates/basecrawl-render",
     "crates/basecrawl-seal",
@@ -37,7 +39,9 @@ thiserror = "2"
 zeroize = { version = "1", features = ["derive"] }
 scraper = "0.27"
 ego-tree = "0.11"
-headless_chrome = "1"
+# Prefer the basecrawl fork package (lib name remains `headless_chrome`).
+# Dual path+version: monorepo builds use path; published dependents resolve version on crates.io.
+headless_chrome = { package = "basecrawl-headless-chrome", path = "crates/basecrawl-headless-chrome", version = "0.1.0" }
 base64 = "0.22"
 png = "0.17"
 encoding_rs = "0.8"
@@ -51,6 +55,3 @@ napi-derive = "3"
 
 [profile.release]
 opt-level = 3
-
-[patch.crates-io]
-headless_chrome = { path = "vendor/headless_chrome" }
