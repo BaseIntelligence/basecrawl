@@ -586,11 +586,16 @@ mod tests {
         });
     }
 
+    // CI runners (incl. root / container) need sandbox(false); production defaults stay on.
+    // Long idle timeout covers fetch+launch under --all-features (fetch shares process deadline).
+
     #[test]
     fn can_launch_chrome_and_get_ws_url() {
         setup();
         let chrome = super::Process::new(
             LaunchOptions::default_builder()
+                .sandbox(false)
+                .idle_browser_timeout(Duration::from_secs(180))
                 .path(Some(default_executable().unwrap()))
                 .build()
                 .unwrap(),
@@ -627,8 +632,12 @@ mod tests {
             fs::remove_dir_all(&installed_dir).expect("Could not delete pre-existing install");
         }
 
+        // Path intentionally None: exercises fetcher install. Deadline must cover
+        // chromium download + launch (shared in Process::new); sandbox off for CI.
         let chrome = super::Process::new(
             LaunchOptions::default_builder()
+                .sandbox(false)
+                .idle_browser_timeout(Duration::from_secs(180))
                 .fetcher_options(FetcherOptions::default().with_install_dir(Some(&tests_temp_dir)))
                 .build()
                 .unwrap(),
@@ -681,6 +690,8 @@ mod tests {
         {
             let _chrome = &mut super::Process::new(
                 LaunchOptions::default_builder()
+                    .sandbox(false)
+                    .idle_browser_timeout(Duration::from_secs(180))
                     .path(Some(default_executable().unwrap()))
                     .build()
                     .unwrap(),
@@ -703,6 +714,8 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 let chrome = super::Process::new(
                     LaunchOptions::default_builder()
+                        .sandbox(false)
+                        .idle_browser_timeout(Duration::from_secs(180))
                         .path(Some(default_executable().unwrap()))
                         .build()
                         .unwrap(),
@@ -728,6 +741,8 @@ mod tests {
         for _ in 0..10 {
             let chrome = super::Process::new(
                 LaunchOptions::default_builder()
+                    .sandbox(false)
+                    .idle_browser_timeout(Duration::from_secs(180))
                     .path(Some(default_executable().unwrap()))
                     .headless(true)
                     .build()
@@ -742,7 +757,14 @@ mod tests {
     fn test_temporary_user_data_dir_is_removed_automatically() {
         setup();
 
-        let options = LaunchOptions::default_builder().build().unwrap();
+        // Explicit system chrome path: under --all-features the default path=None
+        // path would exercise the optional fetcher and share a short deadline with launch.
+        let options = LaunchOptions::default_builder()
+            .sandbox(false)
+            .idle_browser_timeout(Duration::from_secs(180))
+            .path(Some(default_executable().unwrap()))
+            .build()
+            .unwrap();
 
         // Ensure we did not pass an explicit user_data_dir
         let temp_dir = options.user_data_dir.clone();
