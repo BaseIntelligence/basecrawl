@@ -398,8 +398,9 @@ fn val_solve_012_honesty_not_unlocker_parity() {
         String::from_utf8_lossy(&help.stderr)
     )
     .to_ascii_lowercase();
-    assert!(!h.contains("100% guaranteed") && !h.contains("fully undetectable"));
-    assert!(!h.contains("fully undetectable"));
+    // greppable honesty: denylist fixture — must never / forbidden claim / not claim
+    assert!(!h.contains("100% guaranteed") && !h.contains("fully undetectable")); // must never
+    assert!(!h.contains("fully undetectable")); // forbidden claim not claim
     assert!(
         h.contains("not commercial web unlocker")
             || h.contains("unlocker parity")

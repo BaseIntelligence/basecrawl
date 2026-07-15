@@ -411,7 +411,8 @@ fn spawn_soft_ok(marker: &str) -> String {
         marker = marker
     );
     thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(90);
+        // Keep fixture warm across multi-attempt hard-path Chromium deadline retries under load.
+        let deadline = Instant::now() + Duration::from_secs(420);
         while Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
@@ -448,7 +449,8 @@ fn spawn_challenge_origin() -> String {
     let addr = listener.local_addr().expect("addr");
     let body = body.to_string();
     thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        // Outlive multi-attempt hard-path retries when Chromium cold-starts under load.
+        let deadline = Instant::now() + Duration::from_secs(420);
         while Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {

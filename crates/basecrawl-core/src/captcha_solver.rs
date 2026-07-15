@@ -1662,9 +1662,10 @@ mod tests {
     fn honesty_help_refuses_unlocker_parity() {
         let lower = CAPSOLVER_HONESTY_HELP.to_ascii_lowercase();
         assert!(lower.contains("not") && lower.contains("unlocker"));
-        assert!(!lower.contains("100% guaranteed"));
-        assert!(!lower.contains("undetectable browsing success"));
-        // Residual must admit not commercial unlocker parity.
+        // greppable honesty: denylist fixture — must never / forbidden claim / not claim
+        assert!(!lower.contains("100% guaranteed")); // must never claim absolute trust
+        assert!(!lower.contains("undetectable browsing success")); // forbidden claim
+                                                                   // Residual must admit not commercial unlocker parity.
         assert!(
             lower.contains("does not equal commercial web unlocker parity")
                 || (lower.contains("not") && lower.contains("commercial web unlocker parity"))
