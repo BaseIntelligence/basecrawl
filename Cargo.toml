@@ -5,6 +5,7 @@ exclude = ["vendor/headless_chrome"]
 members = [
     "bindings/node",
     "bindings/python",
+    "crates/basecrawl",
     "crates/basecrawl-core",
     "crates/basecrawl-ffi",
     "crates/basecrawl-fp",
@@ -19,6 +20,9 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 rust-version = "1.96"
+repository = "https://github.com/BaseIntelligence/basecrawl"
+homepage = "https://github.com/BaseIntelligence/basecrawl"
+readme = "README.md"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -39,6 +43,13 @@ thiserror = "2"
 zeroize = { version = "1", features = ["derive"] }
 scraper = "0.27"
 ego-tree = "0.11"
+# Dual path+version: monorepo builds use path; published packages resolve version on crates.io.
+basecrawl-proof = { path = "crates/basecrawl-proof", version = "0.1.0" }
+basecrawl-fp = { path = "crates/basecrawl-fp", version = "0.1.0" }
+basecrawl-seal = { path = "crates/basecrawl-seal", version = "0.1.0" }
+basecrawl-render = { path = "crates/basecrawl-render", version = "0.1.0" }
+basecrawl-core = { path = "crates/basecrawl-core", version = "0.1.0" }
+basecrawl-ffi = { path = "crates/basecrawl-ffi", version = "0.1.0" }
 # Prefer the basecrawl fork package (lib name remains `headless_chrome`).
 # Dual path+version: monorepo builds use path; published dependents resolve version on crates.io.
 headless_chrome = { package = "basecrawl-headless-chrome", path = "crates/basecrawl-headless-chrome", version = "0.1.0" }

@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
 description = "basecrawl crawler core: URL/format validation, fetch, and ScrapeProof assembly"
 
 [lib]
@@ -15,10 +18,10 @@ name = "basecrawl"
 path = "src/bin/basecrawl.rs"
 
 [dependencies]
-basecrawl-proof = { path = "../basecrawl-proof" }
-basecrawl-render = { path = "../basecrawl-render" }
-basecrawl-seal = { path = "../basecrawl-seal" }
-basecrawl-fp = { path = "../basecrawl-fp" }
+basecrawl-proof = { workspace = true }
+basecrawl-render = { workspace = true }
+basecrawl-seal = { workspace = true }
+basecrawl-fp = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
 clap.workspace = true

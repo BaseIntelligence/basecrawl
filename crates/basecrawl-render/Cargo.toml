@@ -4,10 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+description = "Headless Chromium CDP rendering to Firecrawl-parity formats for basecrawl"
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
 
 [dependencies]
-basecrawl-fp = { path = "../basecrawl-fp" }
-basecrawl-seal = { path = "../basecrawl-seal" }
+basecrawl-fp = { workspace = true }
+basecrawl-seal = { workspace = true }
 # package rename keeps `use headless_chrome::...` call sites while resolving basecrawl-headless-chrome.
 headless_chrome = { package = "basecrawl-headless-chrome", path = "../basecrawl-headless-chrome", version = "0.1.0", features = ["rustls-tls-webpki-roots"] }
 serde = { workspace = true }

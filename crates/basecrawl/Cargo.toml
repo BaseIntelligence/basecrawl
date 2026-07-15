@@ -1,0 +1,19 @@
+[package]
+name = "basecrawl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Verifiable web crawler CLI that emits a canonical ScrapeProof (thin install package for cargo install basecrawl)"
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["crawler", "scrape", "scrapeproof", "tls", "tee"]
+categories = ["command-line-utilities", "web-programming"]
+
+[[bin]]
+name = "basecrawl"
+path = "src/main.rs"
+
+[dependencies]
+basecrawl-core = { workspace = true }

@@ -11,6 +11,7 @@ pub mod batch;
 pub mod canonical;
 pub mod captcha_solver;
 pub mod charset;
+pub mod cli;
 pub mod content;
 pub mod crawl;
 pub mod document;

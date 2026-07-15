@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
 description = "basecrawl confidentiality: RA-TLS key-release client, in-enclave DoH/DoT, sealed-task AEAD decrypt, result seal to committee"
 
 [lib]
