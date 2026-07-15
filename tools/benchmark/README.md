@@ -2,7 +2,7 @@
 
 Tracked tools under `basecrawl/tools/benchmark/` for fair **basecrawl** vs **Firecrawl** head-to-head (**H2H**) scoring.
 
-Delivers the common **NormalizedResult** schema, multi-dimension **scorer** (0–1 dims + aggregates), **offline re-score**, the **basecrawl adapter** (soft direct, hard Chromium, optional residential Oxylabs with max 1 concurrent dial), and the **Firecrawl cloud adapter** (formats markdown/html/links, proxy basic|auto|enhanced, skip-if-no-key, concurrency ≤2). Matrix runner arrives in a follow-on feature.
+Delivers the common **NormalizedResult** schema, multi-dimension **scorer** (0–1 dims + aggregates), **offline re-score**, the **basecrawl adapter** (soft direct, hard Chromium, optional residential Oxylabs with max 1 concurrent dial), the **Firecrawl cloud adapter** (formats markdown/html/links, proxy basic|auto|enhanced, skip-if-no-key, concurrency ≤2), and the **matrix runner** that produces scoreboard JSON+markdown under gitignored `.docs-evidence/benchmark/`.
 
 ## Honesty (read first)
 
@@ -11,6 +11,7 @@ Delivers the common **NormalizedResult** schema, multi-dimension **scorer** (0�
 - Firecrawl `enhanced` / auto-fallback to enhanced is an optional **non-scoring ceiling**, not parity.
 - Hard / residential / challenge class rows may **typed-skip** when not gated; skips are not soft wins.
 - No claim of commercial Web Unlocker parity.
+- Soft basecrawl success is **never** labeled residential unlock.
 - Secrets (`FIRECRAWL_API_KEY`, Oxylabs credentials) live only in mode-**600** gitignored `.env`. Never print them; never commit them. Scoreboards redaction is mandatory.
 
 ## Layout
@@ -22,7 +23,7 @@ tools/benchmark/
   SCORING.md          # dimension rubric + weights
   FORMATS.md          # fair formats (markdown/html/links only)
   MATRIX.md           # profile matrix labels (CI vs optional)
-  benchmark/          # Python package (schema, scorer, rescore, CLI)
+  benchmark/          # Python package (schema, scorer, rescore, adapters, matrix, CLI)
   fixtures/artifacts/ # hermetic sample normalized rows (no secrets)
   tests/              # focused pytest suite
 ```
@@ -32,6 +33,8 @@ Evidence outputs (live or operator re-score boards) belong under gitignored:
 ```text
 basecrawl/.docs-evidence/benchmark/
 ```
+
+Also ignored: `basecrawl/.firecrawl/` (CLI cache) and `.env`.
 
 ## Fair core formats
 
@@ -49,24 +52,55 @@ Core: content success, interstitial/false-success, markdown quality, links quali
 
 Secondary (basecrawl only): proof / identity. Firecrawl is never failed for missing attestation; proof cannot replace failed content. Details in [SCORING.md](SCORING.md).
 
+## Matrix profiles (summary)
+
+| Scenario | CI default? | Engines | Notes |
+| --- | --- | --- | --- |
+| **P1** soft dual | **yes** | basecrawl soft + Firecrawl basic | same soft URL list + fair formats; FC skip if no key |
+| **P2** JS render | **yes** (dry) | both vs `quotes.toscrape.com/js/` | JS dimension target |
+| **P3** medium / residential | optional | basecrawl hard/res + FC medium | typed skip unless `--include-medium` / `--include-residential` (res max **1**) |
+| **P4** FC enhanced ceiling | optional | Firecrawl enhanced | non-parity ceiling; not core board rewrite |
+| **hard** optional | optional | basecrawl Chromium hard | typed skip unless `--include-hard` |
+
+Full table in [MATRIX.md](MATRIX.md).
+
 ## Usage
 
 From `basecrawl/tools/benchmark`:
 
 ```bash
-# Schema + dimension registry
+# Schema + dimension registry + matrix summary
 python -m benchmark info
 
-# Validate a normalized artifact
-python -m benchmark validate --path fixtures/artifacts/soft-basecrawl-example.json --require-body
+# Matrix documentation as JSON
+python -m benchmark matrix --info
 
-# Score a single artifact
+# Dry matrix: scorer-only re-score of fixtures (no network, no adapters)
+python -m benchmark matrix --scorer-only \
+  --artifacts fixtures/artifacts \
+  --out ../../.docs-evidence/benchmark \
+  --basename scoreboard-fixture-rescore
+
+# Dry hermetic matrix P1+P2 (adapter dry-run, no live dials)
+python -m benchmark matrix --profiles P1,P2 --dry-run \
+  --out ../../.docs-evidence/benchmark --basename scoreboard-matrix-dry
+
+# Soft dual live (keys in mode-600 .env; Firecrawl skip if key missing)
+# python -m benchmark matrix --profiles P1 --live --out ../../.docs-evidence/benchmark
+
+# Optional hard + enhanced ceiling (operator)
+# python -m benchmark matrix --profiles P1,hard,P4 --live \
+#   --include-hard --include-enhanced --out ../../.docs-evidence/benchmark
+
+# Optional residential (max 1 Oxylabs dial; never parallel residential storm)
+# python -m benchmark matrix --profiles P3 --live --include-residential
+
+# Validate / score single artifacts
+python -m benchmark validate --path fixtures/artifacts/soft-basecrawl-example.json --require-body
 python -m benchmark score --path fixtures/artifacts/soft-basecrawl-example.json
 
 # Offline re-score an artifact directory (no network)
 python -m benchmark rescore --artifacts fixtures/artifacts --check-stable
-
-# Write scoreboard under gitignored evidence dir
 mkdir -p ../../.docs-evidence/benchmark
 python -m benchmark rescore --artifacts fixtures/artifacts \
   --out ../../.docs-evidence/benchmark --basename scoreboard-fixture-rescore
@@ -74,7 +108,7 @@ python -m benchmark rescore --artifacts fixtures/artifacts \
 # basecrawl adapter — hermetic soft dry-run (no Oxylabs required)
 python -m benchmark basecrawl --url https://example.com/ --path-mode soft --dry-run
 
-# basecrawl adapter — soft live scrape (direct/--no-js; uses release binary if present)
+# basecrawl adapter — soft live scrape (direct/--no-js)
 python -m benchmark basecrawl --url https://example.com/ --path-mode soft --out /tmp/soft.json
 
 # basecrawl adapter — hard Chromium path
@@ -131,18 +165,28 @@ Behavior:
 - **Cloud-only** for this matrix by default (self-host needs explicit `--api-url` + surface label). Auto-fallback that lands on `proxyUsed=enhanced` is labeled ceiling, not core parity.
 - Medium/hard optional tiers: `--optional-tier medium|hard` → typed skip classes without dialing.
 
-## Matrix profiles (summary)
+## Scoreboard outputs
 
-See [MATRIX.md](MATRIX.md) for engine × path × proxy labels, scoring vs ceiling flags, and CI-default vs operator-optional profiles. Profile ids on artifacts (`profile_id`) must join these labels.
+A completed matrix / rescore write lands as:
+
+```text
+basecrawl/.docs-evidence/benchmark/scoreboard-*.json
+basecrawl/.docs-evidence/benchmark/scoreboard-*.md
+basecrawl/.docs-evidence/benchmark/artifacts/   # normalized rows for re-score
+```
+
+Both formats include an **Honesty** section. Digests are stable for offline re-score of frozen artifacts.
 
 ## Secrets
 
 - Operator: `basecrawl/.env` mode 600 with optional Oxylabs + `FIRECRAWL_API_KEY`.
-- CI: Firecrawl rows skip cleanly when key is absent (adapter leaf).
+- CI: Firecrawl rows skip cleanly when key is absent (adapter + matrix leaf).
 - Never put keys in fixtures, README examples, or scoreboards.
+- Verbose matrix summaries are redacted; leaks refuse to print.
 
 ## What this is not
 
 - Not a full SaaS crawl product comparison.
 - Not a guarantee against every bot manager or WAF.
 - Not a substitute for relay L0–L5 authenticity verification on production tasks.
+- Not commercial Web Unlocker parity and not “undetectable.”

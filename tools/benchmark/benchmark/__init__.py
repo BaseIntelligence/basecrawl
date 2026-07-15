@@ -1,4 +1,4 @@
-"""basecrawl competitive scrape benchmark harness (schema + scorer + adapters).
+"""basecrawl competitive scrape benchmark harness (schema + scorer + adapters + matrix).
 
 Tracked under ``tools/benchmark/``. Live scoreboards land only under
 gitignored ``.docs-evidence/benchmark/``. Core fairness formats are
@@ -37,6 +37,17 @@ from .formats import (
     is_core_format,
     normalize_format_token,
     request_core_formats,
+)
+from .matrix import (
+    DEFAULT_CI_PROFILES,
+    DEFAULT_JS_URL,
+    DEFAULT_SOFT_URLS,
+    DOCUMENTED_PROFILE_IDS,
+    MATRIX_PROFILES,
+    MatrixRunConfig,
+    MatrixRunner,
+    matrix_summary,
+    run_matrix,
 )
 from .redact import collect_secret_fragments, redact_text
 from .rescore import rescore_artifacts, rescore_directory
@@ -105,6 +116,15 @@ __all__ = [
     "redact_text",
     "ResidentialConcurrencyError",
     "residential_slot",
+    "DEFAULT_CI_PROFILES",
+    "DEFAULT_JS_URL",
+    "DEFAULT_SOFT_URLS",
+    "DOCUMENTED_PROFILE_IDS",
+    "MATRIX_PROFILES",
+    "MatrixRunConfig",
+    "MatrixRunner",
+    "matrix_summary",
+    "run_matrix",
 ]
 
 __version__ = "0.1.0"

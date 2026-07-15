@@ -38,6 +38,14 @@ from .firecrawl_adapter import (
     FirecrawlAdapterConfig,
 )
 from .formats import CORE_FORMATS, EXCLUDED_CORE_FORMATS, request_core_formats
+from .matrix import (
+    DEFAULT_CI_PROFILES,
+    DEFAULT_JS_URL,
+    DEFAULT_SOFT_URLS,
+    MatrixRunConfig,
+    MatrixRunner,
+    matrix_summary,
+)
 from .redact import looks_like_secret_leak, redact_text
 from .rescore import digests_equal, rescore_artifacts, rescore_directory, write_scoreboard
 from .schema import (
@@ -217,6 +225,93 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional Firecrawl API URL override (self-host label when set)",
     )
 
+    mx = sub.add_parser(
+        "matrix",
+        help=(
+            "Run matrix profiles (P1 soft dual, P2 JS, P3 optional medium/residential, "
+            "P4 enhanced ceiling, hard typed skip). Default dry; scoreboard under "
+            ".docs-evidence/benchmark/"
+        ),
+    )
+    mx.add_argument(
+        "--profiles",
+        default=",".join(DEFAULT_CI_PROFILES),
+        help="Comma-separated matrix ids: P1,P2,P3,P4,hard (default: CI defaults)",
+    )
+    mx.add_argument(
+        "--scorer-only",
+        action="store_true",
+        help="Dry matrix: score saved artifacts only (no adapter dials)",
+    )
+    mx.add_argument(
+        "--artifacts",
+        default=None,
+        help="Artifact dir for --scorer-only (default: fixtures/artifacts)",
+    )
+    mx.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Hermetic adapter dry-run (no live network; default for safety unless --live)",
+    )
+    mx.add_argument(
+        "--live",
+        action="store_true",
+        help="Allow live network dials (still needs keys/gates; max 1 residential)",
+    )
+    mx.add_argument(
+        "--out",
+        default=None,
+        help="Scoreboard dir (default: basecrawl/.docs-evidence/benchmark/)",
+    )
+    mx.add_argument("--basename", default="scoreboard-matrix")
+    mx.add_argument(
+        "--soft-urls",
+        default=",".join(DEFAULT_SOFT_URLS),
+        help="Comma-separated soft URL list for fair dual H2H",
+    )
+    mx.add_argument("--js-url", default=DEFAULT_JS_URL, help="JS render probe URL")
+    mx.add_argument(
+        "--include-optional",
+        action="store_true",
+        help="Enable all operator-optional profiles (P3/P4/hard) subject to gates",
+    )
+    mx.add_argument(
+        "--include-hard",
+        action="store_true",
+        help="Enable hard optional profile dial (else typed skip)",
+    )
+    mx.add_argument(
+        "--include-enhanced",
+        action="store_true",
+        help="Enable P4 Firecrawl enhanced ceiling (non-parity)",
+    )
+    mx.add_argument(
+        "--include-residential",
+        action="store_true",
+        help="Enable P3 residential (Oxylabs max 1; requires live + .env)",
+    )
+    mx.add_argument(
+        "--include-medium",
+        action="store_true",
+        help="Enable P3 medium optional path (else typed skip)",
+    )
+    mx.add_argument(
+        "--no-dotenv",
+        action="store_true",
+        help="Do not load basecrawl/.env for keys/proxies",
+    )
+    mx.add_argument(
+        "--info",
+        action="store_true",
+        help="Print matrix profile documentation as JSON and exit",
+    )
+    mx.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Verbose runner notes (secrets still redacted)",
+    )
+
     info = sub.add_parser("info", help="Print core formats, dimensions, and weights")
     # info has no required args; keep signature simple
     _ = info
@@ -242,8 +337,73 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "not_unlocker_parity": True,
                 "proof_secondary_only": True,
             },
+            "matrix": matrix_summary(),
         }
         print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "matrix":
+        if args.info:
+            print(json.dumps(matrix_summary(), indent=2, sort_keys=True))
+            return 0
+        profiles = [p.strip() for p in str(args.profiles).split(",") if p.strip()]
+        soft_urls = [u.strip() for u in str(args.soft_urls).split(",") if u.strip()]
+        # Safety: without --live force dry_run so CI never dials accidental network.
+        dry_run = bool(args.dry_run) or not bool(args.live)
+        cfg = MatrixRunConfig(
+            profiles=profiles or list(DEFAULT_CI_PROFILES),
+            scorer_only=bool(args.scorer_only),
+            dry_run=dry_run,
+            live=bool(args.live),
+            include_optional=bool(args.include_optional),
+            include_hard=bool(args.include_hard),
+            include_enhanced=bool(args.include_enhanced),
+            include_residential=bool(args.include_residential),
+            include_medium=bool(args.include_medium),
+            artifacts_dir=args.artifacts,
+            output_dir=args.out,
+            basename=args.basename,
+            soft_urls=soft_urls or list(DEFAULT_SOFT_URLS),
+            js_url=args.js_url or DEFAULT_JS_URL,
+            load_dotenv=not bool(args.no_dotenv),
+            prefer_docs_evidence=args.out is None,
+            verbose=bool(args.verbose),
+        )
+        try:
+            board = MatrixRunner(cfg).run()
+        except (ValueError, FileNotFoundError) as exc:
+            print(
+                json.dumps({"ok": False, "error": str(exc)}, indent=2),
+                file=sys.stderr,
+            )
+            return 1
+        written = board.get("written") or {}
+        # Never dump full board to stdout when verbose secrets could appear; summary only.
+        summary = {
+            "ok": True,
+            "mode": board.get("mode"),
+            "live_network": board.get("live_network", False),
+            "digest": board.get("digest"),
+            "n_rows": (board.get("aggregate") or {}).get("n_rows"),
+            "matrix": board.get("matrix"),
+            "json": written.get("json"),
+            "markdown": written.get("markdown"),
+            "out": written.get("dir"),
+        }
+        text = redact_text(json.dumps(summary, indent=2, sort_keys=True))
+        if looks_like_secret_leak(text):
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": "refusing to emit matrix summary: secret leak detected",
+                    },
+                    indent=2,
+                ),
+                file=sys.stderr,
+            )
+            return 3
+        print(text)
         return 0
 
     if args.command == "validate":
