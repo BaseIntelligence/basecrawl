@@ -27,3 +27,7 @@
 
 # Firecrawl CLI local cache
 .firecrawl/
+
+# Python caches under tools/
+tools/**/__pycache__/
+tools/**/*.py[cod]
