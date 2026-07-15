@@ -8,7 +8,7 @@
 mod common;
 
 use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
 use std::thread;
@@ -162,7 +162,8 @@ fn handle_connection(stream: TcpStream) {
 fn server_base() -> &'static str {
     static BASE: OnceLock<String> = OnceLock::new();
     BASE.get_or_init(|| {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        // Avoid Chromium net::ERR_UNSAFE_PORT on unlucky ephemeral binds (e.g. 6665).
+        let listener = common::bind_chromium_safe_loopback();
         let port = listener.local_addr().expect("local addr").port();
         thread::spawn(move || {
             for stream in listener.incoming().flatten() {
