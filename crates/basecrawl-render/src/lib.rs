@@ -149,6 +149,9 @@ pub enum Action {
     },
     /// Block until an element matching a CSS selector exists (bounded by the render deadline).
     WaitForSelector { selector: String },
+    /// Evaluate a JavaScript expression after settle (product-owned, e.g. Turnstile token apply).
+    /// Bounded by the render deadline. Not marketed as undetectable automation.
+    Evaluate { expression: String },
 }
 
 /// Configuration for a single render.
@@ -2047,6 +2050,12 @@ fn run_action(
                 deadline,
             )?;
         }
+        Action::Evaluate { expression } => {
+            set_tab_deadline(tab, deadline, config.timeout)?;
+            let _ = tab
+                .evaluate(expression, false)
+                .map_err(|e| RenderError::Render(format!("evaluate action failed: {e}")))?;
+        }
     }
     Ok(())
 }
@@ -2542,7 +2551,8 @@ mod tests {
             {"type":"scroll"},
             {"type":"scroll","direction":"up"},
             {"type":"wait","milliseconds":250},
-            {"type":"waitForSelector","selector":".loaded"}
+            {"type":"waitForSelector","selector":".loaded"},
+            {"type":"evaluate","expression":"1+1"}
         ]"##;
         let actions: Vec<Action> = serde_json::from_str(json).unwrap();
         assert_eq!(
@@ -2560,6 +2570,9 @@ mod tests {
                 Action::Wait { milliseconds: 250 },
                 Action::WaitForSelector {
                     selector: ".loaded".to_string()
+                },
+                Action::Evaluate {
+                    expression: "1+1".to_string()
                 },
             ]
         );

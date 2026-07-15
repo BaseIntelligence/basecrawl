@@ -603,20 +603,46 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
         options.captcha_solve_timeout_secs,
     )?;
 
-    // Refuse hard-path silent success when the origin already returned a classic challenge page
-    // before Chromium rolls (VAL-STEALTH-016 / VAL-SOLVE-*). Optional CapSolver may create/poll a
-    // token when configured; content_success still requires a later applied token path and never
-    // forges unlock on auth/timeout/empty solution.
+    // Hard-path challenge solve-or-block (VAL-SOLVE-007 / VAL-HARD-003 / VAL-CROSS-HARD-*).
+    // Without CapSolver key: fail closed (`challenge_blocked`). With key: create/poll, then
+    // inject token through Chromium apply actions with optional human-like micro delays.
+    // Never emit content_success unlocked without a real applied solution.
+    let mut pending_captcha_solution: Option<captcha_solver::SolveSolution> = None;
     if hard_required && stealth::looks_like_challenge_interstitial(&body_str, fetched.status_code) {
-        sticky_profile_guard.wipe_now();
-        return Err(handle_challenge_with_optional_solver(
+        match try_optional_challenge_solve(
             captcha_runtime.as_ref(),
             page_base.as_str(),
             &body_str,
             fetched.status_code,
             "hard path observed a bot-challenge / block response (VAL-STEALTH-016)",
-        ));
+        ) {
+            Ok(Some(sol)) => {
+                pending_captcha_solution = Some(sol);
+            }
+            Ok(None) => {
+                sticky_profile_guard.wipe_now();
+                return Err(Error::ChallengeBlocked {
+                    status_code: fetched.status_code,
+                    detail: "hard path observed a bot-challenge / block response (VAL-STEALTH-016)"
+                        .into(),
+                });
+            }
+            Err(err) => {
+                sticky_profile_guard.wipe_now();
+                return Err(err);
+            }
+        }
     }
+
+    // Prefer product actions, then (when solver path armed with a token) human-paced inject.
+    let mut render_actions = options.actions.clone();
+    if let Some(sol) = pending_captcha_solution.as_ref() {
+        let seed = fingerprint_seed_for_pacing(options.fingerprint_seed.as_deref(), url.as_str());
+        let (mut apply_actions, _delays) =
+            captcha_solver::armed_solver_apply_actions(&sol.token, seed)?;
+        render_actions.append(&mut apply_actions);
+    }
+
     let mut chromium_used = false;
     let rendered_html: Option<String> = if should_render_html {
         let mut rendered = html::render_page_until(
@@ -634,7 +660,7 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
                 origin_pacer: Some(config.origin_pacer.clone()),
                 document_request_policy: Some(render_document_policy(document_policy.clone())),
                 wait_for: options.wait_for.clone(),
-                actions: options.actions.clone(),
+                actions: render_actions.clone(),
                 max_redirects: fetch::MAX_REDIRECTS,
                 accept_language: Some(fingerprint.accept_language.clone()),
                 platform: Some(fingerprint.platform.clone()),
@@ -658,34 +684,147 @@ pub fn scrape(raw_url: &str, options: &ScrapeOptions) -> Result<ScrapeProof, Err
             deadline,
         )?;
         redact_sensitive_request_echoes(&mut rendered.html, &options.headers);
-        // Hard path: refuse to silently score a challenge interstitial as primary success.
+
+        // Hard path: refuse silent success on challenge residual after first Chromium pass.
         if hard_required
             && stealth::looks_like_challenge_interstitial(&rendered.html, fetched.status_code)
         {
-            sticky_profile_guard.wipe_now();
-            return Err(handle_challenge_with_optional_solver(
-                captcha_runtime.as_ref(),
-                page_base.as_str(),
-                &rendered.html,
-                fetched.status_code,
-                "hard path observed a bot-challenge / block interstitial rather than the primary document (VAL-STEALTH-016)",
-            ));
+            if pending_captcha_solution.is_none() {
+                match try_optional_challenge_solve(
+                    captcha_runtime.as_ref(),
+                    page_base.as_str(),
+                    &rendered.html,
+                    fetched.status_code,
+                    "hard path observed a bot-challenge / block interstitial rather than the \
+                     primary document (VAL-STEALTH-016)",
+                ) {
+                    Ok(Some(sol)) => {
+                        // Re-render once with paced token inject (composer DoH / sticky profile).
+                        let seed = fingerprint_seed_for_pacing(
+                            options.fingerprint_seed.as_deref(),
+                            url.as_str(),
+                        );
+                        let (mut apply_actions, _) =
+                            captcha_solver::armed_solver_apply_actions(&sol.token, seed)?;
+                        let mut second_actions = options.actions.clone();
+                        second_actions.append(&mut apply_actions);
+                        let mut rerender = html::render_page_until(
+                            &page_base,
+                            basecrawl_render::RenderConfig {
+                                timeout: Duration::from_secs(options.render_timeout_secs),
+                                user_agent: config.user_agent.clone(),
+                                request_headers: config.headers.clone(),
+                                credential_origin: config.credential_origin.clone(),
+                                crawl_delay: config.crawl_delay,
+                                max_subresources: options.max_render_subresources,
+                                max_resource_bytes: options.max_render_bytes,
+                                max_document_bytes: options.max_body_bytes as u64,
+                                resource_budget: Some(render_resource_budget.clone()),
+                                origin_pacer: Some(config.origin_pacer.clone()),
+                                document_request_policy: Some(render_document_policy(
+                                    document_policy.clone(),
+                                )),
+                                wait_for: options.wait_for.clone(),
+                                actions: second_actions,
+                                max_redirects: fetch::MAX_REDIRECTS,
+                                accept_language: Some(fingerprint.accept_language.clone()),
+                                platform: Some(fingerprint.platform.clone()),
+                                timezone: Some(fingerprint.timezone.clone()),
+                                locale: Some(fingerprint.locale.clone()),
+                                fingerprint_script: if stealth_inject_enabled {
+                                    Some(basecrawl_fp::browser_injection_script(&fingerprint))
+                                } else {
+                                    None
+                                },
+                                window_size: Some((
+                                    fingerprint.viewport_width,
+                                    fingerprint.viewport_height,
+                                )),
+                                sealed_socks: chromium_composer.clone(),
+                                user_data_dir: sticky_profile_dir.clone(),
+                                stealth: true,
+                                require_stealth_inject: hard_required,
+                                chrome_full_version: Some(fingerprint.chrome_full_version.clone()),
+                                chrome_major: Some(fingerprint.chrome_major),
+                                ..basecrawl_render::RenderConfig::default()
+                            },
+                            deadline,
+                        )?;
+                        redact_sensitive_request_echoes(&mut rerender.html, &options.headers);
+                        if let Some(err) = captcha_solver::residual_after_applied_token(
+                            &rerender.html,
+                            fetched.status_code,
+                            &sol.task_id,
+                        ) {
+                            sticky_profile_guard.wipe_now();
+                            return Err(err);
+                        }
+                        let _applied_task = sol.task_id;
+                        chromium_used = true;
+                        Some(rerender.html)
+                    }
+                    Ok(None) => {
+                        sticky_profile_guard.wipe_now();
+                        return Err(Error::ChallengeBlocked {
+                            status_code: fetched.status_code,
+                            detail: "hard path observed a bot-challenge residual after Chromium \
+                                     (detect-not-solve / VAL-STEALTH-016)"
+                                .into(),
+                        });
+                    }
+                    Err(err) => {
+                        sticky_profile_guard.wipe_now();
+                        return Err(err);
+                    }
+                }
+            } else if let Some(sol) = pending_captcha_solution.as_ref() {
+                if let Some(err) = captcha_solver::residual_after_applied_token(
+                    &rendered.html,
+                    fetched.status_code,
+                    &sol.task_id,
+                ) {
+                    sticky_profile_guard.wipe_now();
+                    return Err(err);
+                }
+                chromium_used = true;
+                Some(rendered.html)
+            } else {
+                sticky_profile_guard.wipe_now();
+                return Err(Error::ChallengeBlocked {
+                    status_code: fetched.status_code,
+                    detail: "hard path observed a bot-challenge / block interstitial rather than \
+                             the primary document (VAL-STEALTH-016)"
+                        .into(),
+                });
+            }
+        } else {
+            // No residual challenge — if we applied a token, require observe marker honesty.
+            if let Some(sol) = pending_captcha_solution.as_ref() {
+                if let Some(err) = captcha_solver::residual_after_applied_token(
+                    &rendered.html,
+                    fetched.status_code,
+                    &sol.task_id,
+                ) {
+                    sticky_profile_guard.wipe_now();
+                    return Err(err);
+                }
+            }
+            chromium_used = true;
+            Some(rendered.html)
         }
-        chromium_used = true;
-        Some(rendered.html)
     } else {
-        // Soft-path non-render HTML may still be challenge-like; only hard tasks gate on it.
+        // Soft-path non-render HTML / non-HTML hard tasks: detect-only (no Chromium to inject into).
         if hard_required
             && stealth::looks_like_challenge_interstitial(&body_str, fetched.status_code)
         {
             sticky_profile_guard.wipe_now();
-            return Err(handle_challenge_with_optional_solver(
-                captcha_runtime.as_ref(),
-                page_base.as_str(),
-                &body_str,
-                fetched.status_code,
-                "hard path observed a bot-challenge / block response (VAL-STEALTH-016)",
-            ));
+            return Err(Error::ChallengeBlocked {
+                status_code: fetched.status_code,
+                detail:
+                    "hard path observed a bot-challenge / block response without browser apply \
+                         surface (VAL-STEALTH-016 / detect-not-solve)"
+                        .into(),
+            });
         }
         None
     };
@@ -1108,54 +1247,44 @@ fn crawl_page(
     Ok((markdown, source, page_base))
 }
 
-/// Optional CapSolver attempt on a hard-path challenge (VAL-SOLVE-* / VAL-CROSS-HARD-*).
+/// Optional CapSolver create/poll on a hard-path challenge (VAL-SOLVE-* / VAL-CROSS-HARD-*).
 ///
-/// Without a runtime (no key): classic `challenge_blocked` detect-not-solve residual.
-/// With a runtime: createTask/getTaskResult when the class is supported; failures stay typed
-/// fail-closed. A returned token is **not** content_success — hardpath challenge application is
-/// required before any success claim, so this provider leaf still ends fail-closed
-/// (`solver_apply_pending` or residual) once create/poll completes.
-fn handle_challenge_with_optional_solver(
+/// - No runtime / no key → `challenge_blocked` detect-not-solve (VAL-SOLVE-008).
+/// - Runtime + supported class → createTask/getTaskResult; empty/auth/timeout fail closed
+///   (VAL-SOLVE-007), never content_success without subsequent Chromium apply.
+/// - Returned `SolveSolution` is only a token handle; content_success requires hard-path inject.
+fn try_optional_challenge_solve(
     runtime: Option<&captcha_solver::CaptchaSolverRuntime>,
     website_url: &str,
     html: &str,
     status_code: u16,
     detect_detail: &str,
-) -> Error {
+) -> Result<Option<captcha_solver::SolveSolution>, Error> {
     let Some(rt) = runtime else {
-        return Error::ChallengeBlocked {
+        return Err(Error::ChallengeBlocked {
             status_code,
             detail: detect_detail.to_string(),
-        };
+        });
     };
 
     // Soft residual: residential/class labels are unmodified here. Solver path never invents
     // residential dial success (VAL-CROSS-HARD-003).
     let http = captcha_solver::ReqwestCapSolverHttp::new(rt.config.solve_timeout);
-    match captcha_solver::attempt_optional_solve(Some(rt), website_url, html, status_code, &http) {
-        Ok(Some(solution)) => {
-            // Token received but this feature does not inject into CF completion flow.
-            // Fail closed without content_success so "solved without apply" forgeries are impossible
-            // (VAL-SOLVE-006/007). Digests of the token length only — never the token itself.
-            let _token_len = solution.token.len();
-            Error::Solver {
-                kind: "solver_apply_pending".into(),
-                detail: format!(
-                    "CapSolver returned a turnstile token (task_id={}, len={_token_len}) but \
-                     content_success requires the hard-path apply/inject leaf; refuse forge until \
-                     the token is submitted through the challenge completion flow \
-                     (not commercial Web Unlocker parity)",
-                    solution.task_id
-                ),
-                status_code: Some(status_code),
-            }
+    captcha_solver::attempt_optional_solve(Some(rt), website_url, html, status_code, &http)
+}
+
+/// Stable seed material for human-like pacing delays (solver-armed path only).
+fn fingerprint_seed_for_pacing(explicit: Option<&str>, url: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    match explicit {
+        Some(s) if !s.trim().is_empty() => s.hash(&mut hasher),
+        _ => {
+            basecrawl_fp::UNATTENDED_DEFAULT_SEED.hash(&mut hasher);
+            url.hash(&mut hasher);
         }
-        Ok(None) => Error::ChallengeBlocked {
-            status_code,
-            detail: detect_detail.to_string(),
-        },
-        Err(err) => err,
     }
+    hasher.finish()
 }
 
 /// Adapt the core's typed robots policy to the renderer's dependency-neutral document hook.

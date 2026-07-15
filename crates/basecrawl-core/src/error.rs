@@ -238,6 +238,7 @@ impl Error {
                 "solver_unsupported" => "solver_unsupported",
                 "solver_transport_error" => "solver_transport_error",
                 "solver_apply_pending" => "solver_apply_pending",
+                "solver_apply_failed" => "solver_apply_failed",
                 _ => "solver_error",
             },
             Error::RobotsDenied(_) => "robots_denied",

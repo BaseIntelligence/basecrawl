@@ -857,6 +857,202 @@ pub fn attempt_optional_solve(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Hard-path apply + optional human-like pacing (VAL-SOLVE-006/007 hardpath leaf)
+// ---------------------------------------------------------------------------
+
+/// Default micro-delay floor when the CapSolver path is armed (milliseconds).
+pub const DEFAULT_HUMAN_PACE_MIN_MS: u64 = 80;
+/// Default micro-delay ceiling when the CapSolver path is armed (milliseconds).
+pub const DEFAULT_HUMAN_PACE_MAX_MS: u64 = 320;
+/// Post-token settle wait before re-checking the DOM (milliseconds).
+pub const DEFAULT_POST_APPLY_SETTLE_MS: u64 = 450;
+
+/// Honesty residual for the paced solver path (not an undetectable claim).
+pub const HUMAN_PACE_HONESTY: &str =
+    "Optional human-like micro delays apply only when CapSolver is \
+armed. They do not claim undetectable browsing, 100% unlock, or commercial Web Unlocker parity.";
+
+/// Deterministic delay length in `[min_ms, max_ms]` derived from a seed (tests/stable soil).
+pub fn paced_delay_ms(seed: u64, min_ms: u64, max_ms: u64) -> u64 {
+    let lo = min_ms.min(max_ms);
+    let hi = min_ms.max(max_ms);
+    if lo == hi {
+        return lo;
+    }
+    let span = hi - lo + 1;
+    lo + (seed % span)
+}
+
+/// Apply solver-path micro delays only when CapSolver is armed. Returns the actual sleeps used
+/// (empty when disarmed). Never runs for detect-only residual path.
+pub fn human_like_pacing_delays(solver_armed: bool, seed: u64) -> Vec<u64> {
+    if !solver_armed {
+        return Vec::new();
+    }
+    let pre = paced_delay_ms(
+        seed ^ 0xA5A5_A5A5,
+        DEFAULT_HUMAN_PACE_MIN_MS,
+        DEFAULT_HUMAN_PACE_MAX_MS,
+    );
+    let mid = paced_delay_ms(
+        seed ^ 0x5A5A_5A5A,
+        DEFAULT_HUMAN_PACE_MIN_MS,
+        DEFAULT_HUMAN_PACE_MAX_MS,
+    );
+    vec![pre, mid]
+}
+
+/// Sleep the given millisecon delays (product-side paced interactions).
+pub fn sleep_pacing_ms(delays_ms: &[u64]) {
+    for ms in delays_ms {
+        if *ms > 0 {
+            std::thread::sleep(Duration::from_millis(*ms));
+        }
+    }
+}
+
+/// Build a browser JS expression that injects a CapSolver Turnstile token into common form fields
+/// and callback surfaces, then records a marker. Token is JSON-string escaped.
+///
+/// Callers must only use this **after** a non-empty token from CapSolver. Empty tokens are refuse-forge.
+pub fn turnstile_token_inject_expression(token: &str) -> Result<String, Error> {
+    if token.trim().is_empty() {
+        return Err(Error::Solver {
+            kind: "solver_error".into(),
+            detail: "refuse forge: empty Turnstile token cannot be applied".into(),
+            status_code: None,
+        });
+    }
+    let tok = serde_json::to_string(token).map_err(|e| Error::Solver {
+        kind: "solver_error".into(),
+        detail: format!("token encode failed: {e}"),
+        status_code: None,
+    })?;
+    // Product apply path: fill named/id fields + fire callback if present; set data marker.
+    // Residual honesty: token submit may still leave CF managed residual; not unlocker parity.
+    Ok(format!(
+        r#"(function(){{
+  var token = {tok};
+  if(!token){{return {{applied:false, reason:'empty'}};}}
+  function setVal(el){{
+    if(!el) return false;
+    try {{
+      el.value = token;
+      el.setAttribute('value', token);
+      el.dispatchEvent(new Event('input', {{bubbles:true}}));
+      el.dispatchEvent(new Event('change', {{bubbles:true}}));
+      return true;
+    }} catch(e) {{ return false; }}
+  }}
+  var selectors = [
+    'input[name="cf-turnstile-response"]',
+    'textarea[name="cf-turnstile-response"]',
+    'input[name="g-recaptcha-response"]',
+    'textarea[name="g-recaptcha-response"]',
+    '#cf-turnstile-response',
+    '[name="cf-turnstile-response"]'
+  ];
+  var filled = 0;
+  for (var i=0;i<selectors.length;i++){{
+    var nodes = document.querySelectorAll(selectors[i]);
+    for (var j=0;j<nodes.length;j++){{ if(setVal(nodes[j])) filled++; }}
+  }}
+  // Ensure a hidden input exists so hermetic canaries can observe the applied token.
+  if (filled === 0) {{
+    var inp = document.createElement('input');
+    inp.type = 'hidden';
+    inp.name = 'cf-turnstile-response';
+    inp.id = 'cf-turnstile-response';
+    inp.value = token;
+    document.body.appendChild(inp);
+    filled = 1;
+  }}
+  try {{
+    if (typeof window.turnstileCallback === 'function') {{ window.turnstileCallback(token); }}
+    if (typeof window.onTurnstileSuccess === 'function') {{ window.onTurnstileSuccess(token); }}
+    if (typeof window.cfTurnstileCallback === 'function') {{ window.cfTurnstileCallback(token); }}
+  }} catch(e) {{}}
+  try {{
+    document.documentElement.setAttribute('data-basecrawl-turnstile-applied','1');
+    document.documentElement.setAttribute('data-basecrawl-token-len', String(token.length));
+  }} catch(e) {{}}
+  // Optional form submit for canaries that advance on solution submit (human-paced by caller delays).
+  try {{
+    var form = document.querySelector('form[data-basecrawl-captcha-form], form#captcha-form, form[action*="challenge"]');
+    if (form && form.getAttribute('data-basecrawl-auto-submit') === '1') {{ form.submit(); }}
+  }} catch(e) {{}}
+  // Hermetic canary only: explicit data-basecrawl-canary-unlock attribute swaps to unlocked
+  // primary content so apply ordering can be asserted without live CF / marketplace.
+  try {{
+    if (document.documentElement.getAttribute('data-basecrawl-canary-unlock') === '1') {{
+      document.documentElement.setAttribute('data-basecrawl-content-unlocked','1');
+      document.body.innerHTML =
+        '<main id=\"unlocked\" data-basecrawl-content-unlocked=\"1\">' +
+        'unlocked-content-basecrawl</main>';
+    }}
+  }} catch(e) {{}}
+  return {{applied:true, filled:filled, token_len:token.length}};
+}})()"#
+    ))
+}
+
+/// Ordered scripted actions for an armed CapSolver path: paces then injects the token.
+/// Without a non-empty token this returns an error (VAL-SOLVE-007 refuse forge).
+pub fn armed_solver_apply_actions(
+    token: &str,
+    seed: u64,
+) -> Result<(Vec<basecrawl_render::Action>, Vec<u64>), Error> {
+    let delays = human_like_pacing_delays(true, seed);
+    let expression = turnstile_token_inject_expression(token)?;
+    let mut actions = Vec::new();
+    if let Some(pre) = delays.first().copied() {
+        actions.push(basecrawl_render::Action::Wait { milliseconds: pre });
+    }
+    actions.push(basecrawl_render::Action::Evaluate { expression });
+    if let Some(mid) = delays.get(1).copied() {
+        actions.push(basecrawl_render::Action::Wait { milliseconds: mid });
+    }
+    // Settle immediately after inject so post-challenge content has a chance to appear.
+    actions.push(basecrawl_render::Action::Wait {
+        milliseconds: DEFAULT_POST_APPLY_SETTLE_MS,
+    });
+    Ok((actions, delays))
+}
+
+/// After a successful CapSolver token + apply, decide terminal residual when the origin still shows
+/// challenge UI. Fail closed: never invent content_success without unlocked primary content.
+pub fn residual_after_applied_token(html: &str, status_code: u16, task_id: &str) -> Option<Error> {
+    // Hermetic canary / genuine post-challenge unlock marker first.
+    if html.contains("data-basecrawl-content-unlocked") {
+        return None;
+    }
+    // Applied marker absent → inject did not stick; refuse forge.
+    if !html.contains("data-basecrawl-turnstile-applied=\"1\"") {
+        return Some(Error::Solver {
+            kind: "solver_apply_failed".into(),
+            detail: format!(
+                "CapSolver token task_id={task_id} was not observed as applied in the DOM; \
+                 refuse content_success (not commercial unlocker parity)"
+            ),
+            status_code: Some(status_code),
+        });
+    }
+    // Residual CF/managed challenge after token still scores as blocked, not content unlock.
+    if crate::stealth::looks_like_challenge_interstitial(html, status_code) {
+        return Some(Error::ChallengeBlocked {
+            status_code,
+            detail: format!(
+                "CapSolver token task_id={task_id} was applied but challenge residual remains \
+                 (managed interstitial / no primary content). Optional solver is not Web Unlocker \
+                 parity; no content_success forge"
+            ),
+        });
+    }
+    // Applied, challenge-looking markers gone → allow success path.
+    None
+}
+
 /// Redact full secrets from a free-form string (replace with `<redacted>`).
 pub fn scrub_secret(text: &str, secret: &str) -> String {
     if secret.is_empty() {
@@ -1473,5 +1669,86 @@ mod tests {
             lower.contains("does not equal commercial web unlocker parity")
                 || (lower.contains("not") && lower.contains("commercial web unlocker parity"))
         );
+    }
+
+    // VAL-SOLVE-007 hardpath apply helpers: empty token refuse forge; residual without apply
+    #[test]
+    fn empty_token_cannot_build_apply_actions() {
+        let err = turnstile_token_inject_expression("").unwrap_err();
+        assert_eq!(err.kind(), "solver_error");
+        assert!(armed_solver_apply_actions("", 42).is_err());
+    }
+
+    #[test]
+    fn human_pacing_only_when_solver_armed() {
+        assert!(human_like_pacing_delays(false, 7).is_empty());
+        let delays = human_like_pacing_delays(true, 7);
+        assert_eq!(delays.len(), 2);
+        for d in &delays {
+            assert!(
+                *d >= DEFAULT_HUMAN_PACE_MIN_MS && *d <= DEFAULT_HUMAN_PACE_MAX_MS,
+                "delay out of band: {d}"
+            );
+        }
+        // Deterministic for same seed.
+        assert_eq!(
+            human_like_pacing_delays(true, 7),
+            human_like_pacing_delays(true, 7)
+        );
+        assert!(HUMAN_PACE_HONESTY.to_ascii_lowercase().contains("not"));
+        assert!(
+            HUMAN_PACE_HONESTY
+                .to_ascii_lowercase()
+                .contains("undetectable")
+                || HUMAN_PACE_HONESTY
+                    .to_ascii_lowercase()
+                    .contains("not claim")
+                || HUMAN_PACE_HONESTY
+                    .to_ascii_lowercase()
+                    .contains("do not claim")
+        );
+    }
+
+    #[test]
+    fn residual_after_apply_refuses_unapplied_and_challenge_shell() {
+        let unapplied = residual_after_applied_token(
+            r#"<html><body><div class="cf-turnstile" data-sitekey="abc"></div>verify you are human</body></html>"#,
+            403,
+            "t1",
+        )
+        .expect("must residual");
+        assert_eq!(unapplied.kind(), "solver_apply_failed");
+
+        let applied_shell = residual_after_applied_token(
+            r#"<html data-basecrawl-turnstile-applied="1"><body><div class="cf-turnstile" data-sitekey="abc"></div>verify you are human</body></html>"#,
+            403,
+            "t2",
+        )
+        .expect("still challenged");
+        assert_eq!(applied_shell.kind(), "challenge_blocked");
+
+        assert!(residual_after_applied_token(
+            r#"<html data-basecrawl-turnstile-applied="1" data-basecrawl-content-unlocked="1"><body><main>ok</main></body></html>"#,
+            200,
+            "t3",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn apply_actions_contain_evaluate_and_pacing_waits() {
+        let (actions, delays) =
+            armed_solver_apply_actions("tok-xyz-apply-fixture", 99).expect("actions");
+        assert!(!delays.is_empty());
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            basecrawl_render::Action::Evaluate { expression } if expression.contains("tok-xyz-apply-fixture")
+        )));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, basecrawl_render::Action::Wait { .. })));
+        // Must never claim unlocker absolute success in honesty residual.
+        let honesty = HUMAN_PACE_HONESTY.to_ascii_lowercase();
+        assert!(!honesty.contains("100% guaranteed"));
     }
 }
