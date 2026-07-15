@@ -32,7 +32,7 @@ On the sealed/TEE path, basecrawl aims for **content-confidentiality** (host doe
 
 ## Proxy, composer, and stealth residual
 
-Universal proxy support (HTTP CONNECT / SOCKS5, sticky/session and country username tokens) and the Chromium hard-path composer improve operational success. They do **not** make scrapes anonymous, and they do not defeat every commercial bot system. Proxy is **not anonymity**: exit operators and networks still see destination and traffic shape.
+Universal proxy support (HTTP CONNECT / SOCKS5, sticky/session and country username tokens) and the Chromium hard-path composer improve operational success. They **must never** be marketed as absolute-trust anonymous egress (forbidden claim), and they do not defeat every commercial bot system. Proxy is **not anonymity**: exit operators and networks still see destination and traffic shape.
 
 ### Challenge detect, not captcha solve
 
@@ -72,7 +72,7 @@ Never conflate soft JA3-family alignment with hard Chromium wire identity.
 | WebRTC residual | Hard path forces WebRTC IP handling policy (`disable_non_proxied_udp`) and inject redacts host/LAN ICE candidates so private addresses do not enter page capture/ScrapeProof. Constructor presence, SDP shape, and non-host candidate classes may still residual-leak. |
 | iframe surface residual | `Page.addScriptToEvaluateOnNewDocument` re-applies the stealth inject per new document (including same-origin iframes) so `chrome` / `webdriver` stay parent-coherent. Cross-origin frames, closed shadow roots, and timing races remain residual. |
 | Class forgery | Product fails closed when residential/mobile is required but upstream is unavailable; never advertise a forged class on success. |
-| Soft TLS chrome-impersonate residual | Soft path may align rustls ClientHello suite/group offer toward a documented Chrome-like profile (`--tls-impersonate chrome`). This is stronger than pure seed suite reorder for JA3-family bootstrap, still **in-process** (cert/transcript capture stays complete). Soft digests are labeled `soft_synthetic_impersonate` (**not** native Chromium wire/packet capture). Soft succeeds keep `fetch_path=direct` and never claim residential without a dialed residential proxy. Hard/residential seize still requires real Chromium. Invalid profiles fail closed. Residual GREASE/ALPS/HTTP2 settings fingerprints and modern edge detectors remain. Not undetectable. |
+| Soft TLS chrome-impersonate residual | Soft path may align rustls ClientHello suite/group offer toward a documented Chrome-like profile (`--tls-impersonate chrome`). This is stronger than pure seed suite reorder for JA3-family bootstrap, still **in-process** (cert/transcript capture stays complete). Soft digests are labeled `soft_synthetic_impersonate` (**not** native Chromium wire/packet capture). Soft succeeds keep `fetch_path=direct` and never claim residential without a dialed residential proxy. Hard/residential seize still requires real Chromium. Invalid profiles fail closed. Residual GREASE/ALPS/HTTP2 settings fingerprints and modern edge detectors remain. Product claims **must never** use absolute-trust "undetectable" wording (forbidden claim). |
 | Dual-fetch / soft-preflight timing residual | On hard Chromium targets the engine still performs a **soft rustls document preflight** (redirect/robots/challenge triage, seq=1) before launching Chromium for identity capture (seq=2). That dual-stack timing residual is intentional and documented: soft preflight content is **never** sold as a hard residential Chromium success (`fetch_path` remains `chromium` only when Chromium actually ran; challenge interstitials on soft preflight terminate as `challenge_blocked`). Do not claim single-handshake-only Chromium while this soft preflight remains. Batch soft+hard mixes keep per-item `fetch_path` / class honesty. |
 
 Operator flag reference: [operators/proxy-and-egress.md](operators/proxy-and-egress.md).
@@ -81,11 +81,21 @@ Operator flag reference: [operators/proxy-and-egress.md](operators/proxy-and-egr
 
 `--formats json` is request syntax only when no live extractor/provider is configured. The engine reports structured `structured_extraction_unsupported` / `invalid_json_schema` rather than inventing schema fields. Optional provider keys (`BASECRAWL_EXTRACT_API_KEY`, `OPENAI_API_KEY`) do not authorize empty fake success. See [operators/product-breadth-and-extract.md](operators/product-breadth-and-extract.md).
 
+## Install and registry residual
+
+Public install surface is documented in [operators/install-and-publish.md](operators/install-and-publish.md):
+
+- Preferred CLI: `cargo install basecrawl` (thin crates.io package).
+- Host / CVM **Chromium runtime residual** for hard-path scrapes (soft path optional without browser).
+- npm `@basecrawl/sdk` is **linux-x64 only** for the published package line (not multi-OS).
+- Tags matching `v*` drive `.github/workflows/publish.yml` with ordered crates.io publish and residual npm; secret **names only** (`CARGO_REGISTRY_TOKEN`, `NPM_TOKEN`).
+
 ## Operator checklist
 
 1. Prefer managed-cloud placement for confidential scrapes.
 2. Keep image builds reproducible and digest-pinned; rotate on CVE per [image-rotation-on-cve.md](image-rotation-on-cve.md).
-3. Never advertise absolute-trust language in tooling or docs (no "undetectable", trustless scrape claims, complete unlock SLA language, or anonymity guarantees).
-4. Keep proxy, CapSolver, and LLM/extract keys in gitignored env files (mode `600`); never in ScrapeProof, scoreboards, or CI logs. CapSolver how-to: [operators/proxy-and-egress.md](operators/proxy-and-egress.md).
+3. Never advertise absolute-trust language in tooling or docs (no "undetectable", trustless scrape claims, complete unlock SLA language, or anonymity guarantees). Product claims **must never** use absolute-trust wording; those tokens are **forbidden claims**, not claims this product makes.
+4. Keep proxy, CapSolver, and LLM/extract keys in gitignored env files (mode `600`); never in ScrapeProof, scoreboards, or CI logs. CapSolver how-to: [operators/proxy-and-egress.md](operators/proxy-and-egress.md). Registry tokens (`CARGO_REGISTRY_TOKEN`, `NPM_TOKEN`) stay out of git and product docs (names only).
 5. Treat residential success as topology improvement, not anonymity. Live Oxylabs-style residential: max **1** concurrent dial under `BASECRAWL_LIVE_PROXY=1`.
 6. Default challenge posture is detect-not-solve; enable CapSolver only when you accept account cost and residual re-challenge risk.
+7. Prefer `cargo install basecrawl` for CLI; do not market multi-OS npm when only linux-x64 ships.

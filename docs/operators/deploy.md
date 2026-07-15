@@ -2,9 +2,10 @@
 
 How to run **basecrawl** as a local miner binary, pull the digest-pinned CVM image from
 **GHCR**, and place it on a Phala / dstack TDX guest. Companion docs:
-[Proxy & egress](proxy-and-egress.md), [Breadth & extract](product-breadth-and-extract.md),
-[Security](../SECURITY.md), [Trust model](../TRUST_MODEL.md),
-[Image rotation on CVE](../image-rotation-on-cve.md), [TCB inventory](../tcb-inventory.md).
+[Install & publish](install-and-publish.md), [Proxy & egress](proxy-and-egress.md),
+[Breadth & extract](product-breadth-and-extract.md), [Security](../SECURITY.md),
+[Trust model](../TRUST_MODEL.md), [Image rotation on CVE](../image-rotation-on-cve.md),
+[TCB inventory](../tcb-inventory.md).
 
 This guide is **operator procedure**, not a claim of absolute authenticity, anonymity, or
 defeat of every bot vendor. Authenticity remains **cryptographically-anchored trust-but-audit**.
@@ -41,20 +42,30 @@ flowchart TB
 
 Use this path for soft scrapes, hermetic tests, proxy wiring, and optional CapSolver without a CVM.
 
-### 1.1 Build
+### 1.1 Install or build
 
-Rust toolchain is pinned in `rust-toolchain.toml` (`1.96.0`). From the repository root:
+Rust toolchain is pinned in `rust-toolchain.toml` (`1.96.0`).
+
+**Preferred install after a public crates.io release** (thin packaging crate):
+
+```bash
+cargo install basecrawl --locked
+```
+
+From the repository root (pre-publish, patches, or local engineering):
 
 ```bash
 cargo build --release --locked --package basecrawl-core --bin basecrawl
 # binary: target/release/basecrawl
-```
 
-Optional install onto your `PATH`:
-
-```bash
+# PATH install from monorepo path (thin crate preferred):
+cargo install --path crates/basecrawl --locked
+# alternate:
 cargo install --path crates/basecrawl-core --locked --bin basecrawl
 ```
+
+Published package list, Node `@basecrawl/sdk` linux-x64 residual, Chromium residual, and the
+tag `v*` → `publish.yml` release story: [install-and-publish.md](install-and-publish.md).
 
 ### 1.2 Minimal scrape
 
@@ -307,7 +318,9 @@ Values never belong in git, ScrapeProof, measurements, CI logs, or this table. U
 | `BASECRAWL_EXTRACT_API_KEY` | Optional structured extract provider key |
 | `OPENAI_API_KEY` | Optional extract provider key (alias surface) |
 | `FIRECRAWL_API_KEY` | Benchmark / comparison harness only; never required for scrapes |
-| `GITHUB_TOKEN` / GHCR deploy token | Actions publish uses `GITHUB_TOKEN` with `packages: write`; operator pulls use `read:packages` PAT or `gh` when private |
+| `GITHUB_TOKEN` / GHCR deploy token | Actions image publish uses `GITHUB_TOKEN` with `packages: write`; operator pulls use `read:packages` PAT or `gh` when private |
+| `CARGO_REGISTRY_TOKEN` | Tag-driven crates.io publish secret name only (see [install-and-publish](install-and-publish.md)); never commit values |
+| `NPM_TOKEN` | Optional `@basecrawl/sdk` residual npm publish secret name only; never commit values |
 | Phala CLI profile / API key | Phala account auth for CVM lifecycle; use local CLI profile; never commit |
 | `DSTACK_DOCKER_USERNAME` / `DSTACK_DOCKER_PASSWORD` / `DSTACK_DOCKER_REGISTRY` | Guest pre-launch registry login when pulling private packages into the CVM |
 | `CHALLENGE_MEASUREMENT_ALLOWLIST_FILE` / `CHALLENGE_KEY_RELEASE_ALLOWLIST_FILE` | Validator-side allowlist paths (relay / challenge host), not crawler secrets |
@@ -322,10 +335,12 @@ include proxy passwords or CapSolver keys.
 | Authenticity | Cryptographically-anchored trust-but-audit; not absolute certainty |
 | Proxy / residential | Topology and success-rate tool; **not anonymity** |
 | CapSolver | Optional Turnstile path; **not** Web Unlocker parity; default is detect-not-solve |
-| Headless Chromium | Hard-path identity baseline only; detector residual remains |
+| Headless Chromium | Hard-path identity baseline only; host and CVM need Chromium/Chrome; detector residual remains |
 | Soft TLS vs hard path | Soft chrome-TLS impersonate is not Chromium document TLS |
+| npm `@basecrawl/sdk` | Published package line is **linux-x64 only**; not multi-OS without multi-arch artifacts |
 | TEE.fail / hardware | Self-hosted DDR5 residual; managed Phala reduces but does not erase all TEE risk |
 | Image tags | `:latest` is convenience; **digests** pin verification and allowlists |
+| Registry releases | Tags `v*` drive `publish.yml`; secrets by name only |
 
 Product claims **must never** use absolute-trust wording. The following are **forbidden claims** (not claims this product makes): absolute-trust "trustless" language, "100%" authenticity, "guaranteed" unlock, "anonymous" egress, and "undetectable" browsing.
 
@@ -333,10 +348,12 @@ Product claims **must never** use absolute-trust wording. The following are **fo
 
 | Topic | Link |
 | --- | --- |
+| Install / crates / npm / `v*` publish | [install-and-publish.md](install-and-publish.md) |
 | Proxy / CapSolver / Oxylabs | [proxy-and-egress.md](proxy-and-egress.md) |
 | POST / crawl / map / batch / extract | [product-breadth-and-extract.md](product-breadth-and-extract.md) |
 | CVE image rotation | [image-rotation-on-cve.md](../image-rotation-on-cve.md) |
 | Security residuals | [SECURITY.md](../SECURITY.md) |
 | Trust model | [TRUST_MODEL.md](../TRUST_MODEL.md) |
+| Publish workflow | [Actions → Publish](https://github.com/BaseIntelligence/basecrawl/actions/workflows/publish.yml) |
 | Image workflow | [Actions → Image](https://github.com/BaseIntelligence/basecrawl/actions/workflows/image.yml) |
 | Cargo quality workflow | [Actions → CI](https://github.com/BaseIntelligence/basecrawl/actions/workflows/ci.yml) |

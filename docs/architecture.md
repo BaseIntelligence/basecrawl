@@ -53,14 +53,19 @@ flowchart TB
 
 | Crate | Responsibility |
 | --- | --- |
+| `basecrawl` | Thin CLI install crate (`cargo install basecrawl`); re-exports the engine binary |
 | `basecrawl-core` | Crawl orchestration, CLI binary `basecrawl`, formats, landmark RTT echo, proof assembly |
 | `basecrawl-proof` | Canonical schema, types, and serialization for `ScrapeProof` |
-| `basecrawl-render` | Headless Chromium path via patched `headless_chrome` |
+| `basecrawl-render` | Headless Chromium path via published fork package `basecrawl-headless-chrome` |
+| `basecrawl-headless-chrome` | Publishable CDP / headless Chrome fork (load-bearing APIs for deadlines and `--headless=new`) |
 | `basecrawl-fp` | Seeded JA3/JA4, HTTP headers, UA/viewport/locale, canvas/WebGL |
 | `basecrawl-seal` | RA-TLS / key-release, DoH/DoT, sealed task decrypt, result seal, redaction |
 | `basecrawl-ffi` | Stable C ABI consumed by Python and Node bindings |
 
-Workspace members and shared dependency pins live in the root `Cargo.toml` (`edition = "2021"`, `rust-version = "1.96"`). `vendor/headless_chrome` is excluded from the workspace and selected through `[patch.crates-io]`.
+Workspace members and shared dependency pins live in the root `Cargo.toml` (`edition = "2021"`,
+`rust-version = "1.96"`). Public registry consumers resolve dual path+version edges from crates.io;
+they do not use monorepo path-only patches. Historical `vendor/headless_chrome` is workspace-excluded.
+Node packaging residual (linux-x64) and install commands: [operators/install-and-publish.md](operators/install-and-publish.md).
 
 ## ScrapeProof surface
 
