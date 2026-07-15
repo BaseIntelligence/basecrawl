@@ -7,12 +7,14 @@
 <a href="docs/architecture.md">Architecture</a> ·
 <a href="docs/SECURITY.md">Security</a> ·
 <a href="docs/TRUST_MODEL.md">Trust model</a> ·
+<a href="docs/operators/deploy.md">Deploy</a> ·
 <a href="docs/operators/proxy-and-egress.md">Proxy & egress</a> ·
 <a href="docs/operators/product-breadth-and-extract.md">Breadth & extract</a> ·
 <a href="docs/tcb-inventory.md">TCB inventory</a> ·
 <a href="docs/image-rotation-on-cve.md">Image rotation</a>
 
 [![CI](https://github.com/BaseIntelligence/basecrawl/actions/workflows/ci.yml/badge.svg)](https://github.com/BaseIntelligence/basecrawl/actions/workflows/ci.yml)
+[![Image](https://github.com/BaseIntelligence/basecrawl/actions/workflows/image.yml/badge.svg)](https://github.com/BaseIntelligence/basecrawl/actions/workflows/image.yml)
 [![License](https://img.shields.io/github/license/BaseIntelligence/basecrawl)](https://github.com/BaseIntelligence/basecrawl/blob/main/LICENSE)
 
 </div>
@@ -73,6 +75,7 @@ For crate boundaries, proof fields, and validation layers, see [docs/architectur
 | --- | --- | --- |
 | Engineers | [Architecture](docs/architecture.md) | Crates, ScrapeProof flow, mermaid |
 | Operators / reviewers | [Security](docs/SECURITY.md) | Residuals, TEE.fail, operator checklist |
+| Operators / miners | [Deploy](docs/operators/deploy.md) | Local CLI, GHCR pull, Phala/dstack CVM, digest pin, secrets inventory (names only) |
 | Operators / miners | [Proxy & egress](docs/operators/proxy-and-egress.md) | Universal proxy flags, Oxylabs residential, CapSolver miner key how-to, CF/Akamai residual |
 | Operators | [Breadth & extract](docs/operators/product-breadth-and-extract.md) | POST/crawl/map/batch + gated json extract |
 | Verifiers | [Trust model](docs/TRUST_MODEL.md) | What a proof means; honesty language |
@@ -156,20 +159,37 @@ Supporting capabilities: seeded fingerprints, universal proxy + Chromium compose
 
 ## CVM image
 
-Product image (digest-pinned; do not float on `:latest`):
+**Primary auto-publish registry (GHCR).** Prefer an immutable **digest** for verification and Phala compose pins. `:latest` is convenience only on default-branch publishes and is not a measurement pin.
 
 ```text
-docker.io/mathiiss/basecrawl-cvm@sha256:ba24465efe709c3f071696d807076eb5517d671c1e6f17ca0fe7143178d51e1a
+# GHCR (primary; published by Actions Image workflow)
+ghcr.io/baseintelligence/basecrawl-cvm@sha256:<digest>
+ghcr.io/baseintelligence/basecrawl-cvm:sha-<git-sha>   # immutable tag from CI
+
+# Historic alternate pin (digest only; may lag GHCR)
+docker.io/mathiiss/basecrawl-cvm@sha256:<digest>
 ```
 
 | Property | Value |
 | --- | --- |
+| GHCR repository | `ghcr.io/baseintelligence/basecrawl-cvm` |
+| Pin policy | **Digest** (`@sha256:…`) for verification, allowlists, and CVM compose; `sha-<gitsha>` tags for traceability; `:latest` optional convenience only |
+| Image CI | [Actions → Image](https://github.com/BaseIntelligence/basecrawl/actions/workflows/image.yml) (`.github/workflows/image.yml`; `GITHUB_TOKEN` + `packages: write`) |
+| Cargo quality gate | [Actions → CI](https://github.com/BaseIntelligence/basecrawl/actions/workflows/ci.yml) (independent of registry publish) |
 | Placement | TDX CVM on Phala (`kms_type: phala`) |
 | Guest OS | dstack `0.5.9` family / slug `dstack-0.5.9-bd369a8c` |
 | Socket | `/var/run/dstack.sock` (`Info`, `GetQuote`, related endpoints) |
-| Compose / measurements | Under [`image/`](image/) |
+| Compose / measurements | Under [`image/`](image/) (`docker-compose.yml`, allowlist tools) |
+| Operator guide | [docs/operators/deploy.md](docs/operators/deploy.md) |
 
-Validators authenticate a run by L1 measurement allowlist match plus L2 `report_data` binding, not by shipping the binary alone.
+Pull example (private packages need `docker login ghcr.io` or `gh auth token | docker login …`):
+
+```bash
+docker pull ghcr.io/baseintelligence/basecrawl-cvm:sha-<git-sha>
+# then re-pin compose to the resolved @sha256:<digest>
+```
+
+Validators authenticate a run by L1 measurement allowlist match plus L2 `report_data` binding, not by shipping the binary alone. After a Chromium/OS CVE, rebuild, publish a new immutable digest, and rotate the allowlist per [image-rotation-on-cve.md](docs/image-rotation-on-cve.md).
 
 ## Environment and dependencies
 
