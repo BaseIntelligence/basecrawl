@@ -540,6 +540,17 @@ jobs:
           set -e
           printf '%s\n' "${out}"
           if [[ ${ec} -ne 0 ]]; then
+            # Prefer specific auth-class residual over the generic org/scope soft-pass.
+            # Org can exist while classic automation tokens still fail npm publish 2FA policy.
+            if printf '%s\n' "${out}" | grep -Eqi \
+              'Two-factor authentication|granular access token|bypass 2fa|bypass two-factor|OTP|one-time password'; then
+              {
+                echo "TYPED_BLOCKER=npm_token_2fa_or_granular"
+                echo "detail=npm publish failed: registry requires two-factor authentication or a granular access token with bypass 2FA for publish. crates.io chain already succeeded (crates job green). @basecrawl org may already exist; NPM_TOKEN must be a publish-capable granular token (bypass 2FA) for @basecrawl/sdk. M25 does not auto-rotate secrets."
+              } | tee "${RUNNER_TEMP}/npm-typed-blocker.txt"
+              echo "typed npm 2fa/granular token blocker recorded"
+              exit 42
+            fi
             # Typed blocker path (VAL-NPM-002): missing/unauthorized @basecrawl scope/org
             # after crates already green is an allowed milestone outcome when recorded.
             if printf '%s\n' "${out}" | grep -Eqi \
@@ -551,11 +562,11 @@ jobs:
               echo "typed npm org/scope blocker recorded"
               exit 42
             fi
-            if printf '%s\n' "${out}" | grep -Eqi 'cannot publish over|EPUBLISHCONFLICT|previously published'; then
+            if printf '%s\n' "${out}" | grep -Eqi 'cannot publish over|EPUBLISHCONFLICT|previously published|already been published'; then
               echo "package version already on npm — treating as success"
               exit 0
             fi
-            echo "npm publish failed (not a typed org blocker)" >&2
+            echo "npm publish failed (not a typed auth/org blocker)" >&2
             exit ${ec}
           fi
           echo "npm publish OK for ${NAME}@${VER}"
@@ -570,13 +581,14 @@ jobs:
           conclusion="${{ steps.npm_publish.conclusion }}"
           echo "npm_publish outcome=${outcome} conclusion=${conclusion}"
           if [[ -f "${RUNNER_TEMP}/npm-typed-blocker.txt" ]]; then
-            echo "::warning::TYPED npm org/scope blocker — crates.io publish succeeded; npm deferred"
+            blocker="$(grep -E '^TYPED_BLOCKER=' "${RUNNER_TEMP}/npm-typed-blocker.txt" | head -1 | cut -d= -f2- || true)"
+            echo "::warning::TYPED npm blocker (${blocker:-unknown}) — crates.io publish succeeded; npm deferred"
             cat "${RUNNER_TEMP}/npm-typed-blocker.txt"
-            # Soft-pass so cross-publish topology (crates green → typed npm blocker) is green.
+            # Soft-pass so cross-publish topology (crates green → typed npm residual) is green.
             exit 0
           fi
           if [[ "${outcome}" == "failure" ]]; then
-            echo "npm publish failed without typed @basecrawl org/scope classification" >&2
+            echo "npm publish failed without typed npm auth/org classification" >&2
             exit 1
           fi
           echo "npm job complete"

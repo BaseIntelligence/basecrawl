@@ -146,13 +146,17 @@ test("npm pack includes linux native binary and honesty files; no multi-OS artif
   }
 });
 
-test("publish.yml records typed @basecrawl org/scope blocker after crates green", () => {
+test("publish.yml records typed npm auth residuals after crates green", () => {
   const workflowPath = path.resolve(packageRoot, "../../.github/workflows/publish.yml");
   assert.equal(existsSync(workflowPath), true);
   const yaml = readFileSync(workflowPath, "utf8");
   assert.match(yaml, /@basecrawl\/sdk/);
   assert.match(yaml, /NPM_TOKEN/);
+  // Org-missing and 2fa/granular-token residual classes (soft-pass after crates green).
   assert.match(yaml, /TYPED_BLOCKER=npm_org_or_scope/);
+  assert.match(yaml, /TYPED_BLOCKER=npm_token_2fa_or_granular/);
+  assert.match(yaml, /granular access token|Two-factor authentication/);
+  assert.match(yaml, /already been published/);
   assert.match(yaml, /needs:\s*\n\s*- version-check\s*\n\s*- crates/m);
   // Never hardcode a token value pattern in the workflow.
   assert.doesNotMatch(yaml, /NODE_AUTH_TOKEN:\s*['"]?[a-zA-Z0-9_-]{20,}/);
