@@ -141,28 +141,80 @@ Bottom-up publish order (lower crates live before upper dependents resolve from 
 Live publish uses secret name **`CARGO_REGISTRY_TOKEN`** (never committed, never printed). Product
 docs list secret **names only**.
 
-### Residual npm job
+### Residual npm job (Trusted Publishing / OIDC)
 
 After a green crates path, the same workflow may build and publish `@basecrawl/sdk` with
-`--access public` on `ubuntu-latest` using secret name **`NPM_TOKEN`** (as `NODE_AUTH_TOKEN` in CI).
-If the `@basecrawl` npm org/scope is missing or unauthorized, that is a **typed blocker** after
-crates success; crates remain the primary public install path.
+`--access public` on `ubuntu-latest` (**linux-x64** host only; multi-OS napi matrix is out of scope).
+
+**Primary auth:** [npm Trusted Publishing](https://docs.npmjs.com/trusted-publishers/) via GitHub Actions
+OIDC. The npm job sets `permissions: id-token: write`, keeps `setup-node` `registry-url`, gates
+**Node ≥22.14** and **npm CLI ≥11.5.1**, and runs `npm publish` **without** requiring a bypass-2FA
+`NPM_TOKEN` / `NODE_AUTH_TOKEN`. The CLI exchanges a short-lived OIDC token with the registry.
+
+**Soft typed residuals** (crates job stays green):
+
+| Class | When |
+| --- | --- |
+| `package_not_on_registry` | `@basecrawl/sdk` not yet present on the public registry (first create needed) |
+| `npm_trusted_publisher_missing` | Package exists, but Trusted Publisher is not bound for this workflow / OIDC exchange fails |
+
+#### Path B: first package create (human, interactive OTP)
+
+Trusted Publishing attaches to an **existing** package. If the registry still returns 404 for
+`@basecrawl/sdk`, an owner (account that owns the `@basecrawl` org, e.g. **echobt1**) creates
+`@basecrawl/sdk@0.1.0` once from a **linux x64** host:
+
+```bash
+cd bindings/node
+pnpm install
+pnpm run prepack
+pnpm run smoke:linux
+npm login          # interactive; complete OTP / 2FA when prompted
+npm publish --access public   # interactive OTP when prompted
+```
+
+Do **not** paste long-lived write tokens into scripts, tickets, or logs. Prefer interactive login + OTP
+for this one-time create.
+
+Verify:
+
+```bash
+curl -sf https://registry.npmjs.org/@basecrawl%2fsdk >/dev/null
+npm view @basecrawl/sdk version
+```
+
+#### Then: configure Trusted Publisher on npmjs.com
+
+On the package page → Settings → Trusted Publisher → GitHub Actions:
+
+| Field | Value |
+| --- | --- |
+| Organization or user | `BaseIntelligence` |
+| Repository | `basecrawl` |
+| Workflow filename | `publish.yml` (filename only, not full path) |
+| Allowed actions | **npm publish** |
+
+After that binding exists, re-run Actions → Publish with `workflow_dispatch` and `dry_run=false`
+(or cut the next `v*` tag). The crates job **skips already-live** `0.1.0` versions; the npm job uses
+OIDC. Secret name `NPM_TOKEN` is **not** required for the Trusted Publishing path (legacy residual
+only if an operator still injects it elsewhere).
 
 ### Operator checklist (release)
 
 1. Bump versions consistently (workspace + npm when touching Node).
 2. Keep quality green on `ci.yml`.
-3. Push annotated or lightweight tag `vX.Y.Z`.
-4. Watch [Actions → Publish](https://github.com/BaseIntelligence/basecrawl/actions/workflows/publish.yml).
-5. Prefer `cargo install basecrawl --locked` for consumers; GHCR digests for CVMs.
-6. Never put registry token values into git, tickets, ScrapeProof, or this doc.
+3. For first npm create only: complete Path B local OTP publish, then Trusted Publisher setup above.
+4. Push annotated or lightweight tag `vX.Y.Z` (or `workflow_dispatch` with `dry_run=false`).
+5. Watch [Actions → Publish](https://github.com/BaseIntelligence/basecrawl/actions/workflows/publish.yml).
+6. Prefer `cargo install basecrawl --locked` for consumers; GHCR digests for CVMs.
+7. Never put registry token values into git, tickets, ScrapeProof, or this doc.
 
 ## Secret names (never values)
 
 | Name | Use |
 | --- | --- |
 | `CARGO_REGISTRY_TOKEN` | Ordered `cargo publish` on tag |
-| `NPM_TOKEN` | Optional `@basecrawl/sdk` `npm publish` (`NODE_AUTH_TOKEN`) |
+| `NPM_TOKEN` | **Optional legacy only.** Primary npm path is Trusted Publishing (OIDC); no bypass-2FA token required for CI `npm publish` |
 | `GITHUB_TOKEN` | Existing GHCR / Actions package auth for **image** workflow only |
 
 Proxy / CapSolver / extract environment names remain in [deploy](deploy.md#4-secrets-inventory-names-only).

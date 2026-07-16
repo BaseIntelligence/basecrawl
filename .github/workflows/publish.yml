@@ -9,7 +9,20 @@
 #
 # Secrets (names only; never print, never hard-code):
 #   CARGO_REGISTRY_TOKEN — crates.io API token
-#   NPM_TOKEN            — npm access token for @basecrawl/sdk (NODE_AUTH_TOKEN)
+#   NPM_TOKEN            — OPTIONAL legacy fallback only. npm job primary path is
+#                          Trusted Publishing via GitHub Actions OIDC (no bypass-2FA
+#                          granular token required for `npm publish`).
+#
+# npm Trusted Publishing (primary):
+#   - Job permissions: id-token: write (+ contents: read)
+#   - Node ≥22.14 and npm CLI ≥11.5.1 (OIDC short-lived exchange)
+#   - setup-node keeps registry-url; no NODE_AUTH_TOKEN required for publish
+#   - Soft residual classes when package is absent or Trusted Publisher not linked:
+#       TYPED_BLOCKER=package_not_on_registry
+#       TYPED_BLOCKER=npm_trusted_publisher_missing
+#   - First package create (if registry 404): human Path B — local OTP publish as
+#     echobt1 from linux host bindings/node, then configure Trusted Publisher on
+#     npmjs.com (GitHub org BaseIntelligence, repo basecrawl, workflow publish.yml).
 #
 # Day-0 multi-name crates.io uploads (hobby accounts):
 #   crates.io rate-limits *new crate names* (~10 minutes between names). The crates
@@ -410,6 +423,8 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # npm: @basecrawl/sdk (linux-x64 host). Multi-OS matrix is NOT required for M25.
+  # Primary auth: npm Trusted Publishing via GitHub Actions OIDC (id-token: write).
+  # No bypass-2FA NPM_TOKEN required for live `npm publish`.
   # ---------------------------------------------------------------------------
   npm:
     name: npm @basecrawl/sdk
@@ -417,6 +432,10 @@ jobs:
     needs:
       - version-check
       - crates
+    # OIDC for npm Trusted Publishing (short-lived exchange; no long-lived write token).
+    permissions:
+      contents: read
+      id-token: write
     defaults:
       run:
         working-directory: bindings/node
@@ -433,10 +452,35 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
+          # Trusted Publishing requires Node ≥22.14.0 (npm CLI ≥11.5.1).
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
           # Scope for @basecrawl/sdk publish.
           scope: "@basecrawl"
+
+      - name: Ensure npm CLI supports Trusted Publishing (11.5.1+)
+        # setup-node Node 24 usually ships npm 10.x; npm Trusted Publishing needs ≥11.5.1.
+        # Ref: https://docs.npmjs.com/trusted-publishers/
+        run: |
+          set -euo pipefail
+          echo "node=$(node -v) npm=$(npm -v) before upgrade"
+          npm install -g npm@11.5.1
+          echo "node=$(node -v) npm=$(npm -v) after upgrade"
+          node -e "
+            const [maj, min, pat] = process.versions.node.split('.').map(Number);
+            if (maj < 22 || (maj === 22 && min < 14)) {
+              throw new Error('Node must be >=22.14 for npm Trusted Publishing, got ' + process.versions.node);
+            }
+            console.log('Node version gate OK (>=22.14):', process.versions.node);
+          "
+          node -e "
+            const v = require('child_process').execSync('npm -v', {encoding:'utf8'}).trim();
+            const [maj, min, pat] = v.split('.').map(Number);
+            if (maj < 11 || (maj === 11 && min < 5) || (maj === 11 && min === 5 && pat < 1)) {
+              throw new Error('npm CLI must be >=11.5.1 for Trusted Publishing, got ' + v);
+            }
+            console.log('npm CLI version gate OK (>=11.5.1):', v);
+          "
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -511,65 +555,97 @@ jobs:
             exit 1
           fi
 
-      - name: Live npm publish --access public
+      - name: Live npm publish via OIDC Trusted Publishing
         if: needs.version-check.outputs.dry_run != 'true'
         id: npm_publish
         continue-on-error: true
-        env:
-          # NPM_TOKEN by secret name only → NODE_AUTH_TOKEN for setup-node registry-url.
-          # Never echo, never log the raw value.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # INTENTIONAL: no NODE_AUTH_TOKEN / NPM_TOKEN for primary path.
+        # npm CLI ≥11.5.1 exchanges the Actions OIDC id-token for a short-lived
+        # registry token when Trusted Publisher is configured for this workflow.
+        # Optional secrets.NPM_TOKEN is not required and is not injected here.
         run: |
           set -euo pipefail
-          if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
-            echo "NPM_TOKEN secret is not set on this repository" >&2
-            exit 1
-          fi
-          echo "NPM_TOKEN is present (length=${#NODE_AUTH_TOKEN})"
           # Confirm package name before publish (must be @basecrawl/sdk).
           NAME="$(node -p "require('./package.json').name")"
           VER="$(node -p "require('./package.json').version")"
-          echo "Publishing ${NAME}@${VER} --access public (linux host artifact)"
+          echo "Publishing ${NAME}@${VER} --access public (OIDC Trusted Publishing, linux host artifact)"
           if [[ "${NAME}" != "@basecrawl/sdk" ]]; then
             echo "package name must be @basecrawl/sdk, got ${NAME}" >&2
             exit 1
           fi
+          # Probe registry presence (soft residual input; hard fail not used).
+          # Never print credentials. Public GET only.
           set +e
-          out="$(npm publish --access public 2>&1)"
+          reg_http="$(curl -sS -o /tmp/npm-view-body.txt -w '%{http_code}' \
+            "https://registry.npmjs.org/@basecrawl%2fsdk" 2>/dev/null)"
+          reg_curl_ec=$?
+          set -e
+          echo "registry probe HTTP ${reg_http:-na} curl_ec=${reg_curl_ec}"
+          package_on_registry="false"
+          if [[ "${reg_curl_ec}" -eq 0 && "${reg_http}" == "200" ]]; then
+            package_on_registry="true"
+          fi
+          echo "package_on_registry=${package_on_registry}"
+
+          set +e
+          # --provenance helps first-time Trusted Publishing paths; ignore if env forces off.
+          out="$(npm publish --access public --provenance 2>&1)"
           ec=$?
           set -e
+          # Log publisher stdout/stderr as-is. Actions masks any secret-shaped values.
+          # Never echo NPM_TOKEN / NODE_AUTH_TOKEN.
           printf '%s\n' "${out}"
-          if [[ ${ec} -ne 0 ]]; then
-            # Prefer specific auth-class residual over the generic org/scope soft-pass.
-            # Org can exist while classic automation tokens still fail npm publish 2FA policy.
-            if printf '%s\n' "${out}" | grep -Eqi \
-              'Two-factor authentication|granular access token|bypass 2fa|bypass two-factor|OTP|one-time password'; then
-              {
-                echo "TYPED_BLOCKER=npm_token_2fa_or_granular"
-                echo "detail=npm publish failed: registry requires two-factor authentication or a granular access token with bypass 2FA for publish. crates.io chain already succeeded (crates job green). @basecrawl org may already exist; NPM_TOKEN must be a publish-capable granular token (bypass 2FA) for @basecrawl/sdk. M25 does not auto-rotate secrets."
-              } | tee "${RUNNER_TEMP}/npm-typed-blocker.txt"
-              echo "typed npm 2fa/granular token blocker recorded"
-              exit 42
-            fi
-            # Typed blocker path (VAL-NPM-002): missing/unauthorized @basecrawl scope/org
-            # after crates already green is an allowed milestone outcome when recorded.
-            if printf '%s\n' "${out}" | grep -Eqi \
-              'not authorized|ENEEDAUTH|E404|404 Not Found|//registry.npmjs.org/@basecrawl|scope|organization|org'; then
-              {
-                echo "TYPED_BLOCKER=npm_org_or_scope"
-                echo "detail=npm publish failed due to missing/unauthorized @basecrawl org/scope (or related registry auth). crates.io chain already succeeded (crates job green). User must create @basecrawl org or grant NPM_TOKEN publish rights; token rotation is out of M25 scope."
-              } | tee "${RUNNER_TEMP}/npm-typed-blocker.txt"
-              echo "typed npm org/scope blocker recorded"
-              exit 42
-            fi
-            if printf '%s\n' "${out}" | grep -Eqi 'cannot publish over|EPUBLISHCONFLICT|previously published|already been published'; then
-              echo "package version already on npm — treating as success"
-              exit 0
-            fi
-            echo "npm publish failed (not a typed auth/org blocker)" >&2
-            exit ${ec}
+          if [[ ${ec} -eq 0 ]]; then
+            echo "npm publish OK for ${NAME}@${VER} (OIDC Trusted Publishing)"
+            exit 0
           fi
-          echo "npm publish OK for ${NAME}@${VER}"
+          if printf '%s\n' "${out}" | grep -Eqi 'cannot publish over|EPUBLISHCONFLICT|previously published|already been published'; then
+            echo "package version already on npm — treating as success"
+            exit 0
+          fi
+
+          # Soft residuals (keep crates path green): package missing or Trusted Publisher not wired.
+          # Prefer more specific classes before generic org/scope leftovers.
+          if [[ "${package_on_registry}" != "true" ]]; then
+            {
+              echo "TYPED_BLOCKER=package_not_on_registry"
+              echo "detail=@basecrawl/sdk is not yet on the npm registry (HTTP ${reg_http:-na}). crates.io chain already succeeded. Path B: human echobt1 first-publish with interactive OTP from linux host bindings/node (prepack + smoke + npm publish --access public), then configure Trusted Publisher (GitHub org BaseIntelligence, repo basecrawl, workflow filename publish.yml, allow npm publish). Re-dispatch workflow_dispatch dry_run=false afterward."
+            } | tee "${RUNNER_TEMP}/npm-typed-blocker.txt"
+            echo "typed residual package_not_on_registry recorded"
+            exit 42
+          fi
+
+          if printf '%s\n' "${out}" | grep -Eqi \
+            'trusted.?publisher|OIDC|id-token|Unable to authenticate|ENEEDAUTH|does not have a trusted publisher|not configured for OIDC|exchange.*token|openid|federated'; then
+            {
+              echo "TYPED_BLOCKER=npm_trusted_publisher_missing"
+              echo "detail=npm OIDC Trusted Publishing failed for @basecrawl/sdk while package appears to exist. Configure Trusted Publisher on npmjs.com: GitHub org/user BaseIntelligence, repository basecrawl, workflow filename publish.yml, allowed action npm publish. Job already has permissions.id-token: write and npm CLI >=11.5.1. crates.io chain green; no bypass-2FA NPM_TOKEN required for the primary path."
+            } | tee "${RUNNER_TEMP}/npm-typed-blocker.txt"
+            echo "typed residual npm_trusted_publisher_missing recorded"
+            exit 42
+          fi
+
+          # Legacy residual classes retained for observability (token/org messages if env injects token elsewhere).
+          if printf '%s\n' "${out}" | grep -Eqi \
+            'Two-factor authentication|granular access token|bypass 2fa|bypass two-factor|OTP|one-time password'; then
+            {
+              echo "TYPED_BLOCKER=npm_trusted_publisher_missing"
+              echo "detail=npm publish still demands 2FA/token auth; prefer Trusted Publisher OIDC (no bypass-2FA token). crates green. Configure Trusted Publisher for publish.yml or complete Path B OTP first create if package lifecycle blocked."
+            } | tee "${RUNNER_TEMP}/npm-typed-blocker.txt"
+            echo "typed residual treated as trusted-publisher gap (2fa/token residual)"
+            exit 42
+          fi
+          if printf '%s\n' "${out}" | grep -Eqi \
+            'not authorized|ENEEDAUTH|E404|404 Not Found|//registry.npmjs.org/@basecrawl|scope|organization|org'; then
+            {
+              echo "TYPED_BLOCKER=npm_trusted_publisher_missing"
+              echo "detail=npm publish unauthorized after OIDC attempt; crates green. Likely missing Trusted Publisher binding or package access — configure BaseIntelligence/basecrawl/publish.yml Trusted Publisher or Path B local OTP first create."
+            } | tee "${RUNNER_TEMP}/npm-typed-blocker.txt"
+            echo "typed residual conflated into trusted-publisher gap"
+            exit 42
+          fi
+          echo "npm publish failed (not a typed Trusted Publishing residual)" >&2
+          exit ${ec}
 
       - name: Classify npm outcome
         if: needs.version-check.outputs.dry_run != 'true'
@@ -588,7 +664,7 @@ jobs:
             exit 0
           fi
           if [[ "${outcome}" == "failure" ]]; then
-            echo "npm publish failed without typed npm auth/org classification" >&2
+            echo "npm publish failed without typed Trusted Publishing residual classification" >&2
             exit 1
           fi
           echo "npm job complete"
@@ -597,3 +673,4 @@ jobs:
         if: needs.version-check.outputs.dry_run == 'true'
         run: |
           echo "dry_run=true — built linux native + npm pack only; skipped npm publish"
+          echo "live path uses OIDC Trusted Publishing (id-token: write, npm CLI >=11.5.1); NPM_TOKEN not required"

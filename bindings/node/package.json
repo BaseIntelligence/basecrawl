@@ -34,8 +34,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/BaseIntelligence/basecrawl.git",
+    "url": "git+https://github.com/BaseIntelligence/basecrawl.git",
     "directory": "bindings/node"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   },
   "homepage": "https://github.com/BaseIntelligence/basecrawl#readme",
   "bugs": {

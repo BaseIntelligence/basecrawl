@@ -5,9 +5,10 @@
  * prebuilt ships, package metadata and packaged docs must honestly constrain
  * platform. Smoke require + version on linux must work.
  *
- * VAL-NPM-002: typing path for missing/unauthorized @basecrawl org lives in
- * publish.yml; this suite asserts package name + local prepack honesty so the
- * registry leaf can soft-pass on a typed org blocker after crates green.
+ * Trusted Publishing / OIDC residuals (package_not_on_registry,
+ * npm_trusted_publisher_missing) live in publish.yml; this suite asserts package
+ * name + local prepack honesty and that the workflow stays on the OIDC path
+ * after crates green (soft-pass typed residual rather than hard-fail crates).
  */
 
 const assert = require("node:assert/strict");
@@ -146,18 +147,50 @@ test("npm pack includes linux native binary and honesty files; no multi-OS artif
   }
 });
 
-test("publish.yml records typed npm auth residuals after crates green", () => {
+test("publish.yml uses OIDC Trusted Publishing and typed residuals after crates green", () => {
   const workflowPath = path.resolve(packageRoot, "../../.github/workflows/publish.yml");
   assert.equal(existsSync(workflowPath), true);
   const yaml = readFileSync(workflowPath, "utf8");
   assert.match(yaml, /@basecrawl\/sdk/);
-  assert.match(yaml, /NPM_TOKEN/);
-  // Org-missing and 2fa/granular-token residual classes (soft-pass after crates green).
-  assert.match(yaml, /TYPED_BLOCKER=npm_org_or_scope/);
-  assert.match(yaml, /TYPED_BLOCKER=npm_token_2fa_or_granular/);
-  assert.match(yaml, /granular access token|Two-factor authentication/);
+  // Path A: GitHub Actions OIDC Trusted Publishing (no required bypass-2FA NPM_TOKEN).
+  assert.match(yaml, /id-token:\s*write/);
+  assert.match(yaml, /Trusted Publishing|OIDC/);
+  assert.match(yaml, /npm@11\.5\.1|npm CLI >=?11\.5\.1|11\.5\.1\+/);
+  assert.match(yaml, /node-version:\s*["']?24["']?/);
+  assert.match(yaml, /registry-url:\s*["']https:\/\/registry\.npmjs\.org["']/);
+  // Soft residuals when package absent or Trusted Publisher not configured.
+  assert.match(yaml, /TYPED_BLOCKER=package_not_on_registry/);
+  assert.match(yaml, /TYPED_BLOCKER=npm_trusted_publisher_missing/);
   assert.match(yaml, /already been published/);
   assert.match(yaml, /needs:\s*\n\s*- version-check\s*\n\s*- crates/m);
+  // Live publish step must not require NODE_AUTH_TOKEN / secrets.NPM_TOKEN for OIDC path.
+  // Comment/header may still name NPM_TOKEN as optional legacy; do not inject as required env.
+  const livePublishBlock =
+    yaml.match(/Live npm publish[\s\S]*?(?=\n\s+- name: Classify npm outcome)/) ||
+    yaml.match(/npm publish --access public[\s\S]{0,2500}/);
+  assert.ok(livePublishBlock, "expected live npm publish block in publish.yml");
+  const liveBlock = livePublishBlock[0];
+  assert.doesNotMatch(
+    liveBlock,
+    /NODE_AUTH_TOKEN:\s*\$\{\{\s*secrets\.NPM_TOKEN\s*\}\}/,
+    "live OIDC publish must not wire secrets.NPM_TOKEN into NODE_AUTH_TOKEN",
+  );
   // Never hardcode a token value pattern in the workflow.
   assert.doesNotMatch(yaml, /NODE_AUTH_TOKEN:\s*['"]?[a-zA-Z0-9_-]{20,}/);
+  assert.doesNotMatch(yaml, /npm_[A-Za-z0-9]{20,}/);
+});
+
+test("operator docs mention local OTP first create and Trusted Publisher setup", () => {
+  const docsPath = path.resolve(packageRoot, "../../docs/operators/install-and-publish.md");
+  assert.equal(existsSync(docsPath), true);
+  const docs = readFileSync(docsPath, "utf8");
+  assert.match(docs, /Trusted Publishing|Trusted Publisher/);
+  assert.match(docs, /OIDC|id-token/);
+  assert.match(docs, /OTP|one-time|interactive/);
+  assert.match(docs, /BaseIntelligence/);
+  assert.match(docs, /publish\.yml/);
+  assert.match(docs, /echobt1|local OTP|first package create|first-publish|first create/i);
+  assert.match(docs, /package_not_on_registry|npm_trusted_publisher_missing/);
+  // linux-only honesty remains; multi-OS out of scope.
+  assert.match(docs, /linux-x64 only|not.*multi[- ]?os/i);
 });
