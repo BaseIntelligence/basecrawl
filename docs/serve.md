@@ -40,6 +40,15 @@ X-Basecrawl-Serve-Secret: <same value as BASECRAWL_SERVE_SECRET>
 
 Unmatched secret → **401** fail-closed. Health remains open for probes.
 
+### SaaS API pairing (local)
+
+The private SaaS API (`Basecrawl/api` on `:4410`) must use the **same** env value
+(`ENGINE_SERVE_SECRET` or `BASECRAWL_SERVE_SECRET`) when calling this process.
+Mismatch / only-one-side-set causes API `/v1/scrape|crawl|map|batch` to surface
+**HTTP 502** with error code **`engine_unauthorized`**. Leave **both** API and
+serve unset for open loopback dev. See `basecrawl-api` README "Shared engine serve
+secret" and mission `services.yaml` (`saas-api` + `engine-serve`).
+
 ## Soft scrape example
 
 ```bash
