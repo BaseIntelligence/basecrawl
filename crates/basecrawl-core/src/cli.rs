@@ -1,8 +1,13 @@
-//! `basecrawl` CLI: scrape a URL and emit exactly one canonical ScrapeProof JSON object.
+//! `basecrawl` CLI: scrape a URL and emit exactly one canonical ScrapeProof JSON object,
+//! or run the long-running `serve` HTTP surface for SaaS engine jobs.
 //!
 //! On success the ScrapeProof is written to stdout (nothing else). On failure a structured
 //! `{"error": {...}}` object is written to stderr and the process exits non-zero, so a failed
 //! run never emits a partial ScrapeProof on stdout.
+//!
+//! `basecrawl serve` binds a loopback HTTP listener (default 127.0.0.1:4420) and executes
+//! scrape/crawl/map/batch without re-spawning the CLI. Residual honesty: not anonymous, not
+//! trustless, not a commercial Web Unlocker.
 
 use crate::batch::{self, BatchOptions};
 use crate::crawl::{self, CrawlOptions, CRAWL_MVP_DESCRIPTION};
@@ -10,11 +15,12 @@ use crate::error::Error;
 use crate::fetch::{parse_header, DEFAULT_MAX_BODY_BYTES, DEFAULT_TIMEOUT_SECS};
 use crate::map_lite::{self, MapOptions, MAP_LITE_DESCRIPTION};
 use crate::product_request;
+use crate::serve::{self, ServeConfig, DEFAULT_SERVE_HOST, DEFAULT_SERVE_PORT};
 use crate::{
     format, scrape, screenshot, Action, Format, RobotsPolicy, ScrapeOptions, DEFAULT_MAX_PAGES,
 };
 use base64::Engine;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -22,21 +28,26 @@ use std::path::PathBuf;
 ///
 /// Product breadth (M15): optional `--method`/`--body` (POST+integrity), `--mode crawl|map|batch`
 /// for bounded crawl MVP, map-lite inventory, and multi-URL batch. Extract remains gated.
+/// M3 SaaS: subcommand `serve` for the long-running loopback HTTP engine.
 #[derive(Parser, Debug)]
 #[command(
     name = "basecrawl",
     version,
-    about = "Verifiable web crawler (single scrape, POST/body, crawl MVP, map-lite, batch). \
+    about = "Verifiable web crawler (single scrape, POST/body, crawl MVP, map-lite, batch, serve). \
 Cryptographically-anchored trust-but-audit model (not anonymity). \
 Residual: headless (default --headless=new), CDP/Runtime.enable side-channel risk remains, \
 Chromium product pin major 145 (detectors can track pin lag). \
 Challenge default detect-not-solve; optional CapSolver (`--captcha-solver capsolver` + \
 CAPSOLVER_API_KEY) may attempt createTask/getTaskResult for Turnstile. CapSolver does not equal \
 commercial Web Unlocker parity and must never advertise absolute unlock slogans. Soft CI never requires a solver key. \
-Soft --tls-impersonate is not native Chromium wire. Overt bot sensors still apply.",
+Soft --tls-impersonate is not native Chromium wire. Overt bot sensors still apply. \
+`serve` is a local long-running HTTP engine (default 127.0.0.1:4420), not public multi-region edge.",
     long_about = None
 )]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
     /// URL to scrape / crawl seed / map seed (http/https only). For batch, either this single URL
     /// or `--urls` (comma-separated) is accepted.
     #[arg(value_name = "URL")]
@@ -316,6 +327,37 @@ struct Cli {
     /// CapSolver createTask/getTaskResult whole-solve timeout in seconds [default: 90].
     #[arg(long = "captcha-solve-timeout", value_name = "SECONDS")]
     captcha_solve_timeout: Option<u64>,
+}
+
+/// Subcommands that do not take the single-URL scrape argument surface.
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Long-running local HTTP engine (default bind 127.0.0.1:4420).
+    ///
+    /// Executes scrape/crawl/map/batch over HTTP so the SaaS API never re-spawns the CLI per job.
+    /// Optional shared secret: env `BASECRAWL_SERVE_SECRET` (or `ENGINE_SERVE_SECRET`) requires
+    /// header `X-Basecrawl-Serve-Secret`. Residual: loopback-oriented, not anonymous unlocker,
+    /// not trustless, Chromium residual risk remains.
+    Serve {
+        /// Bind host (default 127.0.0.1). Prefer loopback for local SaaS.
+        /// Also resolvable via env `BASECRAWL_SERVE_HOST` when omitted.
+        #[arg(long = "host", default_value = DEFAULT_SERVE_HOST)]
+        host: String,
+
+        /// Bind port (default 4420). Also resolvable via env `BASECRAWL_SERVE_PORT`.
+        #[arg(long = "port", default_value_t = DEFAULT_SERVE_PORT)]
+        port: u16,
+
+        /// Shorthand `host:port` bind (overrides --host/--port when set).
+        /// Example: `--bind 127.0.0.1:4420`.
+        #[arg(long = "bind", value_name = "HOST:PORT")]
+        bind: Option<String>,
+
+        /// Max concurrent execute handlers [default: 2].
+        /// Also env `BASECRAWL_SERVE_MAX_INFLIGHT`.
+        #[arg(long = "max-inflight", default_value_t = 2)]
+        max_inflight: usize,
+    },
 }
 
 fn run(cli: Cli) -> Result<String, Error> {
@@ -644,6 +686,51 @@ pub fn main() {
     basecrawl_seal::install_host_safe_panic_hook();
 
     let cli = Cli::parse();
+
+    // Subcommand path: long-running serve inherits process life (never emits scrape JSON on stdout).
+    if let Some(Commands::Serve {
+        host,
+        port,
+        bind,
+        max_inflight,
+    }) = cli.command
+    {
+        let mut config = ServeConfig::from_env();
+        // CLI flags win over env defaults for this process invocation.
+        config.host = host;
+        config.port = port;
+        if let Some(bind_spec) = bind {
+            if let Some((h, p)) = bind_spec.rsplit_once(':') {
+                if let Ok(port_num) = p.parse::<u16>() {
+                    config.host = h.to_string();
+                    config.port = port_num;
+                } else {
+                    eprintln!(
+                        "{{\"error\":{{\"kind\":\"invalid_product_option\",\"message\":\"bad --bind '{}'; expected host:port\"}}}}",
+                        bind_spec.replace('\"', "'")
+                    );
+                    std::process::exit(1);
+                }
+            } else {
+                eprintln!(
+                    "{{\"error\":{{\"kind\":\"invalid_product_option\",\"message\":\"bad --bind '{}'; expected host:port\"}}}}",
+                    bind_spec.replace('\"', "'")
+                );
+                std::process::exit(1);
+            }
+        }
+        if max_inflight > 0 {
+            config.max_inflight = max_inflight;
+        }
+        // Re-resolve secret after env may be set; never print its value.
+        config.secret = serve::resolve_serve_secret_from_env();
+        if let Err(err) = serve::run_forever(config) {
+            eprintln!("{}", err.to_host_safe_json_string(None));
+            std::process::exit(err.exit_code());
+        }
+        return;
+    }
+
     let task_id = cli.task_id.clone();
     match run(cli) {
         Ok(json) => println!("{json}"),

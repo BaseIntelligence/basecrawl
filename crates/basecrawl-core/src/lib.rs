@@ -31,6 +31,7 @@ pub mod proxy;
 pub mod robots;
 pub mod rtt_echo;
 pub mod screenshot;
+pub mod serve;
 pub mod stealth;
 pub mod url_validation;
 

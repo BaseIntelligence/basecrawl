@@ -17,3 +17,9 @@ path = "src/main.rs"
 
 [dependencies]
 basecrawl-core = { workspace = true }
+
+[features]
+default = []
+# Long-running HTTP serve surface (loopback :4420). Core always includes the serve
+# module; this flag exists so callers/composers can document intent (`--features serve`).
+serve = []
