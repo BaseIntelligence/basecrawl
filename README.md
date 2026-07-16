@@ -1,3 +1,8 @@
+> **Canonical repository:** [github.com/Basecrawl/basecrawl](https://github.com/Basecrawl/basecrawl).  
+> [BaseIntelligence/basecrawl](https://github.com/BaseIntelligence/basecrawl) is a **read-only mirror**.  
+> Prefer issues and pull requests on the Basecrawl org. crates.io package names are unchanged.  
+> See [MIRROR.md](MIRROR.md) for the dual-push / mirror policy.
+
 <div align="center">
 
 # basecrawl
