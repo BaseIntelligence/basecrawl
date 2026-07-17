@@ -1,0 +1,51 @@
+# syntax=docker/dockerfile:1.7
+# Production engine serve image for in-cluster basecrawl serve (DOKS serve pool).
+# Build context: repository root of basecrawl (same as CVM image/Dockerfile).
+# Differs from TEE CVM image: default CMD is `serve` bound for cluster Service traffic.
+# No secrets in layers — BASECRAWL_SERVE_SECRET / ENGINE_SERVE_SECRET only at runtime.
+
+ARG RUST_VERSION=1.96.0
+
+FROM rust:1.96.0-bookworm@sha256:c993d32d95cc146bd12c84d66f0b924a6a96f3988325f39c144f2f9893dea120 AS build
+
+ARG RUST_VERSION
+ARG SOURCE_DATE_EPOCH=1700000000
+ENV CARGO_INCREMENTAL=0 \
+    SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+WORKDIR /build
+
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY bindings ./bindings
+COPY vendor/headless_chrome ./vendor/headless_chrome
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    test "$(rustc --version | cut -d' ' -f2)" = "${RUST_VERSION}" && \
+    cargo build --release --locked --package basecrawl-core --bin basecrawl && \
+    strip target/release/basecrawl
+
+# Chromium + OS deps prebundled (digest-pinned). Same runtime base as CVM image.
+FROM ghcr.io/puppeteer/puppeteer:24.37.2@sha256:59818936eb9768ba3c1681441ec62e8aacaa67c074e2573bd66bf78a065b31e1
+
+ARG SOURCE_DATE_EPOCH=1700000000
+ARG CHROMIUM_VERSION=145.0.7632.46
+ENV CHROMIUM_VERSION=${CHROMIUM_VERSION} \
+    CHROME=/home/pptruser/.cache/puppeteer/chrome/linux-145.0.7632.46/chrome-linux64/chrome \
+    SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} \
+    RUST_LOG=info \
+    BASECRAWL_SERVE_HOST=0.0.0.0 \
+    BASECRAWL_SERVE_PORT=4420 \
+    BASECRAWL_SERVE_MAX_INFLIGHT=2
+
+COPY --from=build --chown=10042:10042 /build/target/release/basecrawl /usr/local/bin/basecrawl
+
+USER 10042
+WORKDIR /home/pptruser
+EXPOSE 4420
+
+# Health path is intentionally open even when a serve secret is configured.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:4420/health >/dev/null || exit 1
+
+# Cluster pods must bind all interfaces (not host loopback). Flags win over env defaults.
+ENTRYPOINT ["/usr/local/bin/basecrawl"]
+CMD ["serve", "--bind", "0.0.0.0:4420"]
